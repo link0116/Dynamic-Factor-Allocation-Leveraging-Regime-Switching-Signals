@@ -16,7 +16,8 @@ import pandas as pd
 from config import SJMTuningConfig
 from factor.momentum import MomentumConfig, run_momentum_pipeline
 from feature.sjm_features import SJMFeatureConfig, run_feature_pipeline
-from sjm.tuner import build_visual_state_path_with_fixed_best, run_sjm_hyperparameter_tuning
+from sjm.train_sjm import SJMTrainConfig, train_sjm_from_best_parameter
+from sjm.tuner import run_sjm_hyperparameter_tuning
 
 
 @dataclass
@@ -40,11 +41,12 @@ class PipelineConfig:
             momentum_path="outputs/momentum_return.csv",
             market_path="沪深300.csv",
             output_path="outputs/sjm_features.csv",
-            ewma_span=63,
-            rsi_window=14,
-            stoch_window=14,
-            downside_window=63,
-            beta_window=63,
+            ewma_windows=(8, 21, 63),
+            rsi_windows=(8, 21, 63),
+            stoch_windows=(8, 21, 63),
+            macd_pairs=((8, 21), (21, 63)),
+            downside_window=21,
+            beta_window=21,
             standardize_mode="expanding",
         )
     )
@@ -53,7 +55,7 @@ class PipelineConfig:
         default_factory=lambda: SJMTuningConfig(
             features_path="outputs/sjm_features.csv",
             gamma_list=[1, 2, 4, 6, 8, 10, 15, 20],
-            kappa_list=[2, 4, 6, 8, 10, 15],
+            kappa_list=[1.2, 1.6, 2.0, 2.4, 2.8, 3.2, 3.6],
             state_number_list=[2, 3, 4],
             tuning_mode="fixed_split",
             fixed_train_start="2020-01-01",
@@ -71,8 +73,30 @@ class PipelineConfig:
         )
     )
 
+    sjm_train: SJMTrainConfig = field(
+        default_factory=lambda: SJMTrainConfig(
+            features_path="outputs/sjm_features.csv",
+            output_state_path="outputs/sjm_state_daily.csv",
+            output_weight_path="outputs/sjm_feature_weight.csv",
+            output_centroid_path="outputs/sjm_state_centroid.csv",
+            output_transition_path="outputs/sjm_state_transition.csv",
+            n_init=8,
+            max_outer_iter=15,
+            max_inner_iter=30,
+            random_state=42,
+            best_param_path="outputs/best_parameter.json",
+            tuning_mode="fixed_split",
+            fixed_train_start="2020-01-01",
+            fixed_train_end="2023-06-30",
+            fixed_val_start="2023-07-01",
+            fixed_test_start="2024-06-02",
+        )
+    )
+
     regime_plot_path: str = "outputs/sjm_regime_plot.png"
+    test_regime_plot_path: str = "outputs/sjm_test_regime_plot.png"
     split_plot_path: str = "outputs/full_period_split_plot.png"
+    full_regime_plot_path: str = "results/sjm_full_period.png"
 
 
 def _plot_regime_identification(state_daily: pd.DataFrame, output_path: str) -> None:
@@ -255,16 +279,16 @@ def _plot_full_period_split(
 
         if not s.empty:
             state_color_light = {
-                "Bull": (0.45, 0.74, 0.49, 0.20),
-                "Bear": (0.90, 0.39, 0.39, 0.20),
+                "Bull": (0.23, 0.69, 0.33, 0.30),
+                "Bear": (0.86, 0.24, 0.20, 0.30),
             }
             state_color = {
-                "Bull": (0.20, 0.60, 0.25, 0.92),
-                "Bear": (0.78, 0.20, 0.20, 0.92),
+                "Bull": (0.08, 0.52, 0.16, 0.96),
+                "Bear": (0.74, 0.11, 0.08, 0.96),
             }
 
             y_min2, y_max2 = ax.get_ylim()
-            band_h2 = (y_max2 - y_min2) * 0.04
+            band_h2 = (y_max2 - y_min2) * 0.06
             st_dates = s["trade_date"].to_numpy()
             st_vals = s["state_name"].astype(str).to_numpy()
 
@@ -292,7 +316,7 @@ def _plot_full_period_split(
                         linewidth=0,
                         zorder=4,
                     )
-                    seg_start = i
+
 
             ax.axvspan(
                 st_dates[seg_start],
@@ -322,10 +346,10 @@ def _plot_full_period_split(
         Patch(facecolor=(0.80, 0.90, 1.00, 0.18), edgecolor="none", label="Training/History"),
         Patch(facecolor=(0.99, 0.92, 0.75, 0.18), edgecolor="none", label="Validation"),
         Patch(facecolor=(0.85, 0.96, 0.85, 0.18), edgecolor="none", label="Test"),
-        Patch(facecolor=(0.45, 0.74, 0.49, 0.20), edgecolor="none", label="Bull背景"),
-        Patch(facecolor=(0.90, 0.39, 0.39, 0.20), edgecolor="none", label="Bear背景"),
-        Patch(facecolor=(0.20, 0.60, 0.25, 0.92), edgecolor="none", label="Bull状态"),
-        Patch(facecolor=(0.78, 0.20, 0.20, 0.92), edgecolor="none", label="Bear状态"),
+        Patch(facecolor=(0.23, 0.69, 0.33, 0.30), edgecolor="none", label="Bull背景"),
+        Patch(facecolor=(0.86, 0.24, 0.20, 0.30), edgecolor="none", label="Bear背景"),
+        Patch(facecolor=(0.08, 0.52, 0.16, 0.96), edgecolor="none", label="Bull状态"),
+        Patch(facecolor=(0.74, 0.11, 0.08, 0.96), edgecolor="none", label="Bear状态"),
     ]
     ax.legend(handles=legend_handles, loc="upper left")
 
@@ -340,6 +364,99 @@ def _plot_full_period_split(
     plt.close(fig)
 
 
+def _plot_full_regime_identification(
+    full_state_df: pd.DataFrame,
+    tuning_cfg: SJMTuningConfig,
+    output_path: str,
+) -> None:
+    """绘制全样本状态识别图（Training + Validation + Test）。"""
+
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+    except ImportError as err:
+        raise ImportError("未安装matplotlib，无法生成可视化图") from err
+
+    data = full_state_df.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+    data = data.dropna(subset=["trade_date", "active_return", "state_name"]).sort_values("trade_date")
+    if data.empty:
+        raise ValueError("全样本状态数据为空，无法绘图")
+
+    full_dates = data["trade_date"].reset_index(drop=True)
+    full_nav = (1.0 + data["active_return"].astype(float)).cumprod().reset_index(drop=True)
+    full_state = data["state_name"].astype(str).reset_index(drop=True)
+    if not (len(full_dates) == len(full_nav) == len(full_state)):
+        raise ValueError("full_dates/full_nav/full_state 长度不一致，无法绘图")
+
+    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "SimSun"]
+    plt.rcParams["axes.unicode_minus"] = False
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(full_dates, full_nav, color="tab:blue", linewidth=1.6, label="主动净值")
+
+    color_map = {
+        "Bull": (0.0, 0.5, 0.0, 0.18),
+        "Bear": (1.0, 0.0, 0.0, 0.18),
+    }
+
+    date_vals = full_dates.to_numpy()
+    state_vals = full_state.to_numpy()
+
+    if len(data) > 0:
+        seg_start = 0
+        for i in range(1, len(data)):
+            if state_vals[i] != state_vals[i - 1]:
+                left = date_vals[seg_start]
+                right = date_vals[i]
+                ax.axvspan(left, right, color=color_map.get(state_vals[i - 1], (0.7, 0.7, 0.7, 0.12)), linewidth=0)
+                seg_start = i
+
+        ax.axvspan(
+            date_vals[seg_start],
+            date_vals[-1],
+            color=color_map.get(state_vals[-1], (0.7, 0.7, 0.7, 0.12)),
+            linewidth=0,
+        )
+
+    train_end = pd.to_datetime(tuning_cfg.fixed_train_end)
+    valid_end = pd.to_datetime(tuning_cfg.fixed_val_end)
+    y_min, y_max = ax.get_ylim()
+    label_y = y_max - (y_max - y_min) * 0.03
+
+    for x, txt in [(train_end, "Train End"), (valid_end, "Validation End")]:
+        if full_dates.min() <= x <= full_dates.max():
+            ax.axvline(x, color="gray", linewidth=1.5, linestyle="--", alpha=0.95)
+            ax.text(x, label_y, txt, rotation=90, va="top", ha="right", fontsize=9, color="gray")
+
+    ax.set_title("SJM状态识别图（Momentum Active Return）\nTraining + Validation + Test", fontsize=13)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Active NAV")
+    ax.grid(alpha=0.25)
+
+    from matplotlib.patches import Patch
+
+    legend_handles = [
+        plt.Line2D([0], [0], color="tab:blue", lw=1.8, label="主动净值"),
+        Patch(facecolor=(0.0, 0.5, 0.0, 0.18), edgecolor="none", label="Bull 区间"),
+        Patch(facecolor=(1.0, 0.0, 0.0, 0.18), edgecolor="none", label="Bear 区间"),
+    ]
+    ax.legend(handles=legend_handles, loc="upper left")
+
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    for label in ax.get_xticklabels():
+        label.set_rotation(45)
+        label.set_horizontalalignment("right")
+
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.show(block=False)
+    plt.pause(0.1)
+    plt.close(fig)
+
+
 def run_pipeline(config: PipelineConfig) -> None:
     """执行完整流程并输出可视化。"""
 
@@ -347,44 +464,37 @@ def run_pipeline(config: PipelineConfig) -> None:
     run_momentum_pipeline(config.momentum)
 
     print("[step2] 构建SJM特征...")
-    feature_df = run_feature_pipeline(config.feature)
+    run_feature_pipeline(config.feature)
 
-    print("[step3] SJM参数优化（Sharpe目标）+ 测试集Online Inference...")
+    print("[step3] SJM参数优化（tuner仅调参）...")
     tune_outputs = run_sjm_hyperparameter_tuning(config.sjm_tuning)
-    state_daily = tune_outputs["rolling_test_result"].copy()
 
-    print("[step3.5] 训练+验证段可视化推断（固定最佳参数，不参与调参）...")
-    train_val_visual_state = build_visual_state_path_with_fixed_best(
-        cfg=config.sjm_tuning,
-        best_parameter=tune_outputs["best_parameter"],
+    print("[step4] train_sjm读取best_parameter并完成最终训练与状态输出...")
+    train_outputs = train_sjm_from_best_parameter(config.sjm_train)
+    full_period_state = train_outputs["state_daily"].copy()
+
+    print("[step5] 生成全样本SJM状态识别图（Training + Validation + Test）...")
+    _plot_full_regime_identification(
+        full_state_df=full_period_state,
+        tuning_cfg=config.sjm_tuning,
+        output_path=config.full_regime_plot_path,
     )
 
-    # 拼接成全样本连续状态带：训练+验证（可视化推断） + 测试（正式在线推断）。
-    if train_val_visual_state.empty:
-        state_for_full_split_plot = state_daily.copy()
-    else:
-        state_for_full_split_plot = pd.concat([train_val_visual_state, state_daily], ignore_index=True)
-        state_for_full_split_plot = (
-            state_for_full_split_plot.sort_values("trade_date")
-            .drop_duplicates(subset=["trade_date"], keep="last")
-            .reset_index(drop=True)
-        )
-
-    print("[step4] 生成状态识别图...")
-    _plot_regime_identification(state_daily, config.regime_plot_path)
-    print(f"[done] 可视化输出: {config.regime_plot_path}")
-
-    print("[step5] 生成全时期划分图...")
-    _plot_full_period_split(
-        feature_df,
-        config.sjm_tuning,
-        config.split_plot_path,
-        state_daily=state_for_full_split_plot,
+    print("[step6] 生成仅测试集SJM状态识别图...")
+    test_start = pd.to_datetime(config.sjm_tuning.fixed_test_start)
+    test_state = full_period_state[full_period_state["trade_date"] >= test_start].copy()
+    if test_state.empty:
+        raise ValueError("测试集状态数据为空，无法生成仅测试集图")
+    _plot_regime_identification(
+        state_daily=test_state,
+        output_path=config.test_regime_plot_path,
     )
-    print(f"[done] 全时期划分图输出: {config.split_plot_path}")
+
+    print(f"[done] 全样本状态识别图输出: {config.full_regime_plot_path}")
+    print(f"[done] 测试集状态识别图输出: {config.test_regime_plot_path}")
     print(f"[done] 最优参数输出: {config.sjm_tuning.best_param_path}")
     print(f"[done] 参数结果输出: {config.sjm_tuning.param_result_path}")
-    print(f"[done] 测试集在线推断输出: {config.sjm_tuning.rolling_test_path}")
+    print(f"[done] 最终状态输出: {config.sjm_train.output_state_path}")
 
 
 if __name__ == "__main__":

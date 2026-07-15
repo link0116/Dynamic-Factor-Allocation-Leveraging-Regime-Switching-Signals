@@ -38,9 +38,10 @@ class SJMTuningConfig:
 
     # 参数搜索网格
     gamma_list: list[float] = field(default_factory=lambda: [1, 2, 4, 6, 8, 10, 15, 20])
-    kappa_list: list[float] = field(default_factory=lambda: [2, 4, 6, 8, 10, 15])
-    train_window_years_list: list[int] = field(default_factory=lambda: [8, 9, 10, 11, 12])
-    state_number_list: list[int] = field(default_factory=lambda: [2, 3, 4])
+    # 当前特征维度p=14，sqrt(p)≈3.74；kappa应主要落在该阈值以下才会形成有效约束。
+    kappa_list: list[float] = field(default_factory=lambda: [1.2, 1.6, 2.0, 2.4, 2.8, 3.2, 3.6])
+    train_window_years_list: list[int] = field(default_factory=lambda: [4])
+    state_number_list: list[int] = field(default_factory=lambda: [2])
 
     # 调参模式：
     # - fixed_split: 固定训练/验证/测试切分（当前默认，适配有限样本）

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 import sys
+import json
 
 import numpy as np
 import pandas as pd
@@ -46,13 +47,25 @@ class SJMTrainConfig:
     output_centroid_path: str = "outputs/sjm_state_centroid.csv"
     output_transition_path: str = "outputs/sjm_state_transition.csv"
 
-    n_states: int = 2
-    jump_penalty: float = 12.0
-    kappa: Optional[float] = 4.0
+    # 手动训练入口(train_sjm)使用的模型超参数。
+    # 若调用 train_sjm_from_best_parameter，本组参数会被忽略。
+    manual_n_states: int = 2
+    manual_jump_penalty: float = 12.0
+    manual_kappa: Optional[float] = 4.0
     n_init: int = 8
     max_outer_iter: int = 15
     max_inner_iter: int = 30
     random_state: int = 42
+
+    # 从调参结果读取最佳参数
+    best_param_path: str = "outputs/best_parameter.json"
+
+    # 训练/推断模式配置
+    tuning_mode: str = "fixed_split"
+    fixed_train_start: str = "2020-01-01"
+    fixed_train_end: str = "2023-06-30"
+    fixed_val_start: str = "2023-07-01"
+    fixed_test_start: str = "2024-06-02"
 
     # 可选训练截止日；若设置，则仅用 <= train_end_date 的样本拟合，
     # 并对全样本做在线推断，便于样本内/样本外拆分。
@@ -82,6 +95,22 @@ def _load_feature_data(features_path: str) -> pd.DataFrame:
     # SJM输入必须无缺失。
     df = df.dropna(subset=z_cols + ["active_return"]).reset_index(drop=True)
     return df
+
+
+def _load_best_parameter(best_param_path: str) -> dict:
+    """读取tuner输出的最佳参数文件。"""
+
+    p = Path(best_param_path)
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    if not p.exists():
+        raise FileNotFoundError(f"最佳参数文件不存在: {p}")
+
+    payload = json.loads(p.read_text(encoding="utf-8"))
+    for key in ["gamma", "kappa", "state_number"]:
+        if key not in payload:
+            raise ValueError(f"最佳参数文件缺少字段: {key}")
+    return payload
 
 
 def _build_transition_matrix(state: np.ndarray, n_states: int) -> pd.DataFrame:
@@ -175,8 +204,8 @@ def train_sjm(config: SJMTrainConfig) -> dict[str, pd.DataFrame | SparseJumpMode
     - state_transition: 状态转移
     """
 
-    if config.n_states != 2:
-        raise ValueError("本任务第三步要求状态数固定为2，请设置 n_states=2")
+    if config.manual_n_states != 2:
+        raise ValueError("本任务第三步要求状态数固定为2，请设置 manual_n_states=2")
 
     df = _load_feature_data(config.features_path)
     z_cols = [c for c in df.columns if c.startswith("z_")]
@@ -193,9 +222,9 @@ def train_sjm(config: SJMTrainConfig) -> dict[str, pd.DataFrame | SparseJumpMode
     X_train = train_df[z_cols].to_numpy(dtype=float)
 
     model = SparseJumpModel(
-        n_states=config.n_states,
-        jump_penalty=config.jump_penalty,
-        kappa=config.kappa,
+        n_states=config.manual_n_states,
+        jump_penalty=config.manual_jump_penalty,
+        kappa=config.manual_kappa,
         max_outer_iter=config.max_outer_iter,
         max_inner_iter=config.max_inner_iter,
         n_init=config.n_init,
@@ -226,7 +255,7 @@ def train_sjm(config: SJMTrainConfig) -> dict[str, pd.DataFrame | SparseJumpMode
 
     feature_weight = _extract_feature_weight(model, z_cols)
     state_centroid = _extract_state_centroid(model, z_cols, state_name_map, old_to_new)
-    state_transition = _build_transition_matrix(state_daily["state"].to_numpy(), n_states=config.n_states)
+    state_transition = _build_transition_matrix(state_daily["state"].to_numpy(), n_states=config.manual_n_states)
     state_transition["from_state_name"] = state_transition["from_state"].map(
         lambda x: state_name_map.get(int(x), f"State_{int(x)}")
     )
@@ -248,6 +277,108 @@ def train_sjm(config: SJMTrainConfig) -> dict[str, pd.DataFrame | SparseJumpMode
         "state_centroid": state_centroid,
         "state_transition": state_transition,
     }
+
+
+def train_sjm_from_best_parameter(config: SJMTrainConfig) -> dict[str, pd.DataFrame | SparseJumpModel]:
+    """读取best_parameter.json并完成最终模型训练与状态输出。
+
+    责任边界：
+    - tuner 仅负责调参并输出 best_parameter.json；
+    - 本函数专门负责读取最佳参数、训练最终模型、输出状态与统计。
+    """
+
+    best = _load_best_parameter(config.best_param_path)
+
+    # 使用调参结果作为最终模型超参数，与手动参数彻底解耦。
+    best_n_states = int(best["state_number"])
+    best_jump_penalty = float(best["gamma"])
+    best_kappa = float(best["kappa"])
+
+    df = _load_feature_data(config.features_path)
+    z_cols = [c for c in df.columns if c.startswith("z_")]
+
+    if config.tuning_mode == "fixed_split":
+        train_start = pd.to_datetime(config.fixed_train_start)
+        train_end = pd.to_datetime(config.fixed_train_end)
+        infer_start = pd.to_datetime(config.fixed_val_start)
+
+        full_df = df[df["trade_date"] >= train_start].copy().reset_index(drop=True)
+        train_df = full_df[(full_df["trade_date"] >= train_start) & (full_df["trade_date"] <= train_end)].copy()
+        infer_df = full_df[full_df["trade_date"] >= infer_start].copy()
+
+        if len(train_df) < 120:
+            raise ValueError("Training样本不足，无法训练最终模型")
+        if infer_df.empty:
+            raise ValueError("Validation/Test样本为空，无法进行online inference")
+
+        X_train = train_df[z_cols].to_numpy(dtype=float)
+        model = SparseJumpModel(
+            n_states=best_n_states,
+            jump_penalty=best_jump_penalty,
+            kappa=best_kappa,
+            max_outer_iter=config.max_outer_iter,
+            max_inner_iter=config.max_inner_iter,
+            n_init=config.n_init,
+            random_state=config.random_state,
+        )
+        model, train_state_raw = model.fit(X_train)
+
+        old_to_new = build_state_rank_mapping_by_train_active_return(
+            train_state=train_state_raw,
+            train_active_return=train_df["active_return"].to_numpy(dtype=float),
+        )
+        train_state = np.array([old_to_new[int(s)] for s in train_state_raw], dtype=int)
+        train_state_expected = build_state_expected_return_map(
+            train_state=train_state,
+            train_active_return=train_df["active_return"].to_numpy(dtype=float),
+        )
+        state_name_map = assign_state_name_from_expected_return(train_state_expected)
+
+        infer_state_raw = model.online_predict(infer_df[z_cols].to_numpy(dtype=float))
+        infer_state = np.array([old_to_new[int(s)] for s in infer_state_raw], dtype=int)
+
+        train_out = train_df[["trade_date", "active_return", "momentum_return", "market_return"]].copy()
+        train_out["state"] = train_state.astype(int)
+        train_out["state_name"] = train_out["state"].map(lambda s: state_name_map.get(int(s), f"State_{int(s)}"))
+
+        infer_out = infer_df[["trade_date", "active_return", "momentum_return", "market_return"]].copy()
+        infer_out["state"] = infer_state.astype(int)
+        infer_out["state_name"] = infer_out["state"].map(lambda s: state_name_map.get(int(s), f"State_{int(s)}"))
+
+        state_daily = pd.concat([train_out, infer_out], ignore_index=True)
+        state_daily = (
+            state_daily.sort_values("trade_date")
+            .drop_duplicates(subset=["trade_date"], keep="first")
+            .reset_index(drop=True)
+        )
+
+        feature_weight = _extract_feature_weight(model, z_cols)
+        state_centroid = _extract_state_centroid(model, z_cols, state_name_map, old_to_new)
+        state_transition = _build_transition_matrix(state_daily["state"].to_numpy(), n_states=best_n_states)
+        state_transition["from_state_name"] = state_transition["from_state"].map(
+            lambda x: state_name_map.get(int(x), f"State_{int(x)}")
+        )
+        state_transition["to_state_name"] = state_transition["to_state"].map(
+            lambda x: state_name_map.get(int(x), f"State_{int(x)}")
+        )
+
+        Path(config.output_state_path).parent.mkdir(parents=True, exist_ok=True)
+        state_daily.to_csv(config.output_state_path, index=False, encoding="utf-8-sig")
+        feature_weight.to_csv(config.output_weight_path, index=False, encoding="utf-8-sig")
+        state_centroid.to_csv(config.output_centroid_path, index=False, encoding="utf-8-sig")
+        state_transition.to_csv(config.output_transition_path, index=False, encoding="utf-8-sig")
+
+        return {
+            "model": model,
+            "state_daily": state_daily,
+            "feature_weight": feature_weight,
+            "state_centroid": state_centroid,
+            "state_transition": state_transition,
+            "best_parameter": best,
+        }
+
+    # rolling模式下回退到原训练接口（保持兼容）。
+    return train_sjm(config)
 
 
 def online_inference(model: SparseJumpModel, latest_feature_df: pd.DataFrame) -> pd.DataFrame:
@@ -276,26 +407,3 @@ def online_inference(model: SparseJumpModel, latest_feature_df: pd.DataFrame) ->
     out["state"] = path.astype(int)
     return out
 
-
-if __name__ == "__main__":
-    cfg = SJMTrainConfig(
-        features_path="outputs/sjm_features.csv",
-        output_state_path="outputs/sjm_state_daily.csv",
-        output_weight_path="outputs/sjm_feature_weight.csv",
-        output_centroid_path="outputs/sjm_state_centroid.csv",
-        output_transition_path="outputs/sjm_state_transition.csv",
-        n_states=2,
-        jump_penalty=12.0,
-        kappa=4.0,
-        n_init=8,
-        max_outer_iter=15,
-        max_inner_iter=30,
-        random_state=42,
-        train_end_date="2024-06-01",
-    )
-
-    outputs = train_sjm(cfg)
-    state_daily = outputs["state_daily"]
-    print(f"[done] 状态输出样本数: {len(state_daily):,}")
-    print("[done] 状态分布:")
-    print(state_daily["state_name"].value_counts())

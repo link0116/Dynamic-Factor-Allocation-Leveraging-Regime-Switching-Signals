@@ -27,9 +27,10 @@ class SJMFeatureConfig:
     - momentum_path: 第一步输出的动量组合收益文件。
     - market_path: 市场指数数据文件（默认沪深300）。
     - output_path: 输出SJM输入特征文件。
-    - ewma_span: EWMA主动收益窗口（指数加权span）。
-    - rsi_window: RSI窗口。
-    - stoch_window: 随机指标%K窗口。
+    - ewma_windows: EWMA主动收益窗口列表。
+    - rsi_windows: RSI窗口列表。
+    - stoch_windows: 随机指标%K窗口列表。
+    - macd_pairs: MACD快慢窗口列表，格式[(fast, slow), ...]。
     - downside_window: 下行波动窗口。
     - beta_window: Active Beta窗口。
     - standardize_mode:
@@ -42,11 +43,12 @@ class SJMFeatureConfig:
     market_path: str = "沪深300.csv"
     output_path: str = "outputs/sjm_features.csv"
 
-    ewma_span: int = 63
-    rsi_window: int = 14
-    stoch_window: int = 14
-    downside_window: int = 63
-    beta_window: int = 63
+    ewma_windows: tuple[int, ...] = (8, 21, 63)
+    rsi_windows: tuple[int, ...] = (8, 21, 63)
+    stoch_windows: tuple[int, ...] = (8, 21, 63)
+    macd_pairs: tuple[tuple[int, int], ...] = ((8, 21), (21, 63))
+    downside_window: int = 21
+    beta_window: int = 21
 
     standardize_mode: str = "expanding"
     min_periods_ratio: float = 0.6
@@ -214,8 +216,12 @@ def build_sjm_features(base_df: pd.DataFrame, config: SJMFeatureConfig) -> pd.Da
     - market_return（可选环境变量，这里默认保留）
     """
 
-    min_periods_rsi = max(2, int(np.ceil(config.rsi_window * config.min_periods_ratio)))
-    min_periods_stoch = max(2, int(np.ceil(config.stoch_window * config.min_periods_ratio)))
+    min_periods_rsi = {
+        w: max(2, int(np.ceil(w * config.min_periods_ratio))) for w in config.rsi_windows
+    }
+    min_periods_stoch = {
+        w: max(2, int(np.ceil(w * config.min_periods_ratio))) for w in config.stoch_windows
+    }
     min_periods_down = max(2, int(np.ceil(config.downside_window * config.min_periods_ratio)))
     min_periods_beta = max(2, int(np.ceil(config.beta_window * config.min_periods_ratio)))
 
@@ -225,10 +231,19 @@ def build_sjm_features(base_df: pd.DataFrame, config: SJMFeatureConfig) -> pd.Da
     # 把主动收益累积为主动净值，便于构造技术指标。
     df["active_nav"] = (1.0 + df["active_return"].fillna(0.0)).cumprod()
 
-    df["ewma_active_return"] = df["active_return"].ewm(span=config.ewma_span, adjust=False).mean()
-    df["rsi"] = _rsi_from_series(df["active_nav"], window=config.rsi_window, min_periods=min_periods_rsi)
-    df["macd"] = _macd_hist_from_series(df["active_nav"]) 
-    df["stoch_k"] = _stochastic_k_from_series(df["active_nav"], window=config.stoch_window, min_periods=min_periods_stoch)
+    for w in config.ewma_windows:
+        df[f"ewma_active_return_{w}"] = df["active_return"].ewm(span=w, adjust=False).mean()
+
+    for w in config.rsi_windows:
+        df[f"rsi_{w}"] = _rsi_from_series(df["active_nav"], window=w, min_periods=min_periods_rsi[w])
+
+    for fast, slow in config.macd_pairs:
+        signal = max(2, int(round((fast + slow) / 2)))
+        df[f"macd_{fast}_{slow}"] = _macd_hist_from_series(df["active_nav"], fast=fast, slow=slow, signal=signal)
+
+    for w in config.stoch_windows:
+        df[f"stoch_k_{w}"] = _stochastic_k_from_series(df["active_nav"], window=w, min_periods=min_periods_stoch[w])
+
     df["downside_deviation"] = _downside_deviation(df["active_return"], window=config.downside_window, min_periods=min_periods_down)
     df["active_beta"] = _active_beta(
         df["momentum_return"],
@@ -262,15 +277,16 @@ def _zscore_expanding(s: pd.Series, min_periods: int = 30) -> pd.Series:
 def standardize_features(df: pd.DataFrame, config: SJMFeatureConfig) -> tuple[pd.DataFrame, list[str]]:
     """对特征做标准化，并输出可供SJM直接使用的列清单。"""
 
-    feature_cols = [
-        "ewma_active_return",
-        "rsi",
-        "macd",
-        "stoch_k",
+    feature_cols = []
+    feature_cols.extend([f"ewma_active_return_{w}" for w in config.ewma_windows])
+    feature_cols.extend([f"rsi_{w}" for w in config.rsi_windows])
+    feature_cols.extend([f"macd_{fast}_{slow}" for fast, slow in config.macd_pairs])
+    feature_cols.extend([f"stoch_k_{w}" for w in config.stoch_windows])
+    feature_cols.extend([
         "downside_deviation",
         "active_beta",
         "market_return",
-    ]
+    ])
 
     out = df.copy()
     for col in feature_cols:
@@ -356,9 +372,10 @@ if __name__ == "__main__":
         momentum_path="outputs/momentum_return.csv",
         market_path="沪深300.csv",
         output_path="outputs/sjm_features.csv",
-        ewma_span=63,
-        rsi_window=14,
-        stoch_window=14,
+        ewma_windows=(8, 21, 63),
+        rsi_windows=(8, 21, 63),
+        stoch_windows=(8, 21, 63),
+        macd_pairs=((8, 21), (21, 63)),
         downside_window=63,
         beta_window=63,
         standardize_mode="expanding",

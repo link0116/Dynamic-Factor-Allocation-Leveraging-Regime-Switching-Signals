@@ -9,7 +9,6 @@ SJM超参数优化模块（严格时序、严格防未来泄露）。
 输出：
 - outputs/best_parameter.json
 - outputs/parameter_result.csv
-- outputs/rolling_test_result.csv
 """
 
 from __future__ import annotations
@@ -33,6 +32,7 @@ from config import SJMTuningConfig
 from evaluation.metrics import compute_strategy_metrics
 from sparse_jump_model import SparseJumpModel
 from strategy.long_short import (
+    assign_state_name_from_expected_return,
     build_long_short_returns,
     build_state_expected_return_map,
     build_state_rank_mapping_by_train_active_return,
@@ -273,15 +273,11 @@ def _run_fixed_split_tuning(
 
     train_df = df[(df["trade_date"] >= train_start) & (df["trade_date"] <= train_end)].copy()
     val_df = df[(df["trade_date"] >= val_start) & (df["trade_date"] <= val_end)].copy()
-    test_df = df[df["trade_date"] >= test_start].copy()
 
     if len(train_df) < 120:
         raise ValueError("Training样本不足，至少需要120个交易日")
     if len(val_df) < 60:
         raise ValueError("Validation样本不足，至少需要60个交易日")
-    if len(test_df) < 1:
-        raise ValueError("Test样本为空，请检查fixed_test_start")
-
     grid = list(itertools.product(cfg.gamma_list, cfg.kappa_list, cfg.state_number_list))
     param_records: list[dict[str, Any]] = []
 
@@ -322,24 +318,6 @@ def _run_fixed_split_tuning(
     param_df = pd.DataFrame(param_records)
     best = _select_best_param(param_df)
 
-    # 固定最佳参数，仅对测试段做online inference（禁止重调参）。
-    test_strategy = _fit_and_infer(
-        train_df=train_df,
-        infer_df=test_df,
-        z_cols=z_cols,
-        n_states=int(best["state_number"]),
-        gamma=float(best["gamma"]),
-        kappa=float(best["kappa"]),
-        cfg=cfg,
-    )
-    test_strategy["anchor_date"] = test_start.date().isoformat()
-    test_strategy["test_start"] = test_start.date().isoformat()
-    test_strategy["test_end"] = df["trade_date"].max().date().isoformat()
-    test_strategy["gamma"] = float(best["gamma"])
-    test_strategy["kappa"] = float(best["kappa"])
-    test_strategy["window"] = train_window_years
-    test_strategy["state_number"] = int(best["state_number"])
-
     best_payload = {
         "gamma": float(best["gamma"]),
         "kappa": float(best["kappa"]),
@@ -351,12 +329,11 @@ def _run_fixed_split_tuning(
     return {
         "best_payload": best_payload,
         "param_df": param_df,
-        "rolling_test_df": test_strategy,
     }
 
 
 def run_sjm_hyperparameter_tuning(cfg: SJMTuningConfig | None = None) -> dict[str, Any]:
-    """执行完整SJM调参与滚动测试。
+    """执行SJM超参数搜索。
 
     流程（严格防泄露）：
     1) 在每个6个月锚点，使用锚点之前历史数据做参数搜索（训练+验证）。
@@ -366,9 +343,9 @@ def run_sjm_hyperparameter_tuning(cfg: SJMTuningConfig | None = None) -> dict[st
     5) 下个锚点重复，允许纳入新发生数据重新搜索。
 
     返回：
-    - best_parameter（全局最优）
+    - fixed_split: best_parameter（唯一最优）
+    - rolling: rolling_best_parameter（每个anchor的最优参数）
     - parameter_result（所有验证参数结果）
-    - rolling_test_result（逐日测试结果）
     """
 
     cfg = cfg or SJMTuningConfig()
@@ -378,7 +355,6 @@ def run_sjm_hyperparameter_tuning(cfg: SJMTuningConfig | None = None) -> dict[st
         fixed_result = _run_fixed_split_tuning(df=df, z_cols=z_cols, cfg=cfg)
         best_payload = fixed_result["best_payload"]
         param_df = fixed_result["param_df"]
-        rolling_test_df = fixed_result["rolling_test_df"]
     elif cfg.tuning_mode == "rolling":
         min_date = df["trade_date"].min()
         max_date = df["trade_date"].max()
@@ -391,7 +367,7 @@ def run_sjm_hyperparameter_tuning(cfg: SJMTuningConfig | None = None) -> dict[st
             raise ValueError("无可用滚动节点，请检查test_start_date与数据区间")
 
         param_records: list[dict[str, Any]] = []
-        rolling_test_rows: list[pd.DataFrame] = []
+        rolling_best_records: list[dict[str, Any]] = []
 
         grid = list(
             itertools.product(
@@ -425,53 +401,56 @@ def run_sjm_hyperparameter_tuning(cfg: SJMTuningConfig | None = None) -> dict[st
             best = _select_best_param(cycle_df)
             param_records.extend(cycle_records)
 
+            # ===== 修正1：Rolling重新训练保持与调参一致的训练窗口 =====
+            # 对于anchor时点的最终重训，窗口必须与调参阶段一致：fit = Training + Validation。
+            # 即 fit_start = validation_start - train_window_years, fit_end = anchor - 1 day。
             history_end = anchor - pd.Timedelta(days=1)
-            test_end = min(anchor + pd.DateOffset(months=cfg.reopt_months) - pd.Timedelta(days=1), max_date)
+            validation_start = anchor - pd.DateOffset(years=cfg.validation_years)
+            fit_start = validation_start - pd.DateOffset(years=int(best["window"]))
+            fit_end = history_end
 
-            fit_df = df[df["trade_date"] <= history_end].copy()
-            test_df = df[(df["trade_date"] >= anchor) & (df["trade_date"] <= test_end)].copy()
-            if len(fit_df) < 120 or len(test_df) == 0:
-                continue
-
-            test_strategy = _fit_and_infer(
-                train_df=fit_df,
-                infer_df=test_df,
-                z_cols=z_cols,
-                n_states=int(best["state_number"]),
-                gamma=float(best["gamma"]),
-                kappa=float(best["kappa"]),
-                cfg=cfg,
+            rolling_best_records.append(
+                {
+                    "anchor_date": anchor.date().isoformat(),
+                    "gamma": float(best["gamma"]),
+                    "kappa": float(best["kappa"]),
+                    "window": int(best["window"]),
+                    "state_number": int(best["state_number"]),
+                    "Sharpe": float(best["Sharpe"]),
+                    "fit_start": fit_start.date().isoformat(),
+                    "fit_end": fit_end.date().isoformat(),
+                }
             )
-            test_strategy["anchor_date"] = anchor.date().isoformat()
-            test_strategy["test_start"] = anchor.date().isoformat()
-            test_strategy["test_end"] = pd.Timestamp(test_end).date().isoformat()
-            test_strategy["gamma"] = float(best["gamma"])
-            test_strategy["kappa"] = float(best["kappa"])
-            test_strategy["window"] = int(best["window"])
-            test_strategy["state_number"] = int(best["state_number"])
-            rolling_test_rows.append(test_strategy)
 
         if not param_records:
             raise ValueError("没有任何参数组合得到有效验证结果，请检查窗口长度与样本区间")
+        if not rolling_best_records:
+            raise ValueError("Rolling模式未生成任何anchor最优参数，请检查窗口长度与样本区间")
 
         param_df = pd.DataFrame(param_records)
-        best_global = _select_best_param(param_df)
-        rolling_test_df = pd.concat(rolling_test_rows, ignore_index=True) if rolling_test_rows else pd.DataFrame()
-        best_payload = {
-            "gamma": float(best_global["gamma"]),
-            "kappa": float(best_global["kappa"]),
-            "train_window": int(best_global["window"]),
-            "state_number": int(best_global["state_number"]),
-            "Sharpe": float(best_global["Sharpe"]),
-        }
+        rolling_best_df = pd.DataFrame(rolling_best_records)
     else:
         raise ValueError("tuning_mode 仅支持 fixed_split 或 rolling")
 
-    best_path = Path(cfg.best_param_path)
-    if not best_path.is_absolute():
-        best_path = PROJECT_ROOT / best_path
-    best_path.parent.mkdir(parents=True, exist_ok=True)
-    best_path.write_text(json.dumps(best_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    if cfg.tuning_mode == "fixed_split":
+        best_path = Path(cfg.best_param_path)
+        if not best_path.is_absolute():
+            best_path = PROJECT_ROOT / best_path
+        best_path.parent.mkdir(parents=True, exist_ok=True)
+        best_path.write_text(json.dumps(best_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    else:
+        # ===== 修正2：Rolling模式保存每个Anchor最佳参数，不再输出Global Best =====
+        best_path = Path(cfg.best_param_path)
+        if not best_path.is_absolute():
+            best_path = PROJECT_ROOT / best_path
+        rolling_best_path = best_path.with_name("rolling_best_parameter.csv")
+        rolling_best_path.parent.mkdir(parents=True, exist_ok=True)
+        rolling_best_cols = ["anchor_date", "gamma", "kappa", "window", "state_number", "Sharpe", "fit_start", "fit_end"]
+        rolling_best_df[rolling_best_cols].sort_values("anchor_date").to_csv(
+            rolling_best_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
 
     param_path = Path(cfg.param_result_path)
     if not param_path.is_absolute():
@@ -513,72 +492,26 @@ def run_sjm_hyperparameter_tuning(cfg: SJMTuningConfig | None = None) -> dict[st
     keep_cols = [c for c in keep_cols if c in export_df.columns]
     export_df.sort_values("Sharpe", ascending=False)[keep_cols].to_csv(param_path, index=False, encoding="utf-8-sig")
 
-    test_path = Path(cfg.rolling_test_path)
-    if not test_path.is_absolute():
-        test_path = PROJECT_ROOT / test_path
-    test_path.parent.mkdir(parents=True, exist_ok=True)
-    rolling_test_df.to_csv(test_path, index=False, encoding="utf-8-sig")
+    if cfg.tuning_mode == "fixed_split":
+        return {
+            "config": asdict(cfg),
+            "best_parameter": best_payload,
+            "parameter_result": param_df,
+        }
 
     return {
         "config": asdict(cfg),
-        "best_parameter": best_payload,
+        "rolling_best_parameter": rolling_best_df,
         "parameter_result": param_df,
-        "rolling_test_result": rolling_test_df,
     }
-
-
-def build_visual_state_path_with_fixed_best(
-    cfg: SJMTuningConfig,
-    best_parameter: dict[str, Any],
-) -> pd.DataFrame:
-    """用固定最佳参数对训练+验证区间做仅可视化推断。
-
-    设计目标：
-    - 不改变调参与测试流程；
-    - 仅用于绘图，把训练+验证段也补齐Bull/Bear状态色带；
-    - 严格使用“固定最佳参数 + 训练集拟合”来做状态推断。
-
-    输入输出：
-    - 输入：调参配置cfg，最佳参数best_parameter
-    - 输出：包含 trade_date/state/state_name 的可视化状态DataFrame
-    """
-
-    df, z_cols = _load_feature_data(cfg.features_path)
-
-    gamma = float(best_parameter["gamma"])
-    kappa = float(best_parameter["kappa"])
-    n_states = int(best_parameter["state_number"])
-
-    if cfg.tuning_mode == "fixed_split":
-        train_start = pd.to_datetime(cfg.fixed_train_start)
-        train_end = pd.to_datetime(cfg.fixed_train_end)
-        test_start = pd.to_datetime(cfg.fixed_test_start)
-
-        train_df = df[(df["trade_date"] >= train_start) & (df["trade_date"] <= train_end)].copy()
-        vis_df = df[(df["trade_date"] >= train_start) & (df["trade_date"] < test_start)].copy()
-    else:
-        test_start = pd.to_datetime(cfg.test_start_date)
-        train_df = df[df["trade_date"] < test_start].copy()
-        vis_df = df[df["trade_date"] < test_start].copy()
-
-    if len(train_df) < 120 or vis_df.empty:
-        return pd.DataFrame(columns=["trade_date", "state", "state_name", "active_return", "momentum_return", "market_return"])
-
-    vis_states = _fit_and_infer(
-        train_df=train_df,
-        infer_df=vis_df,
-        z_cols=z_cols,
-        n_states=n_states,
-        gamma=gamma,
-        kappa=kappa,
-        cfg=cfg,
-    )
-    return vis_states.reset_index(drop=True)
 
 
 if __name__ == "__main__":
     result = run_sjm_hyperparameter_tuning(SJMTuningConfig())
-    print("[done] best_parameter:")
-    print(result["best_parameter"])
+    if "best_parameter" in result:
+        print("[done] best_parameter:")
+        print(result["best_parameter"])
+    else:
+        print("[done] rolling_best_parameter rows:")
+        print(len(result["rolling_best_parameter"]))
     print(f"[done] parameter_result rows: {len(result['parameter_result']):,}")
-    print(f"[done] rolling_test_result rows: {len(result['rolling_test_result']):,}")
