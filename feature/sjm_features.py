@@ -18,13 +18,17 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from factor.common import compute_daily_returns, load_price_panel
+
 
 @dataclass
 class SJMFeatureConfig:
     """SJM特征工程参数。
 
     字段说明：
-    - momentum_path: 第一步输出的动量组合收益文件。
+    - factor_path: 因子组合收益文件（可为动量/低波/规模）。
+    - factor_return_col: 因子收益列名，如 momentum_return/low_volatility_return/size_return。
+    - momentum_path: 兼容旧配置（将被factor_path优先覆盖）。
     - market_path: 市场指数数据文件（默认沪深300）。
     - output_path: 输出SJM输入特征文件。
     - ewma_windows: EWMA主动收益窗口列表。
@@ -39,9 +43,14 @@ class SJMFeatureConfig:
     - min_periods_ratio: 滚动类特征的最小有效样本比例。
     """
 
+    factor_path: str = "outputs/momentum_return.csv"
+    factor_return_col: str = "momentum_return"
+
+    # 兼容旧配置字段。
     momentum_path: str = "outputs/momentum_return.csv"
     market_path: str = "沪深300.csv"
     output_path: str = "outputs/sjm_features.csv"
+    daily_data_root: Optional[str] = "data/A股日线指标"
 
     ewma_windows: tuple[int, ...] = (8, 21, 63)
     rsi_windows: tuple[int, ...] = (8, 21, 63)
@@ -49,9 +58,101 @@ class SJMFeatureConfig:
     macd_pairs: tuple[tuple[int, int], ...] = ((8, 21), (21, 63))
     downside_window: int = 21
     beta_window: int = 21
+    market_env_windows: tuple[int, ...] = (21, 63)
+    include_market_breadth: bool = True
 
     standardize_mode: str = "expanding"
     min_periods_ratio: float = 0.6
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 按因子类型预设的特征窗口配置（仅覆盖与全局默认不同的参数）
+# ─────────────────────────────────────────────────────────────────────────────
+FACTOR_FEATURE_PRESETS: dict[str, dict] = {
+    # 动量信号
+    "momentum": {
+        "ewma_windows": (8, 21, 63),
+        "rsi_windows": (8, 21, 63),
+        "stoch_windows": (8, 21, 63),
+        "macd_pairs": ((8, 21), (21, 63)),
+        "downside_window": 21,
+        "beta_window": 21,
+    },
+    # 低波信号
+    "lowvol": {
+        "ewma_windows": (8, 21, 63),
+        "rsi_windows": (8, 21, 63),
+        "stoch_windows": (8, 21, 63),
+        "macd_pairs": ((8, 21), (21, 63)),
+        "downside_window": 21,
+        "beta_window": 21,
+    },
+    # 规模信号
+    "size": {
+        "ewma_windows": (8, 21, 63),
+        "rsi_windows": (8, 21, 63),
+        "stoch_windows": (8, 21, 63),
+        "macd_pairs": ((8, 21), (21, 63)),
+        "downside_window": 21,
+        "beta_window": 21,
+    },
+    # 价值因子：中期窗口
+    "value": {
+        "ewma_windows": (8, 21, 63),
+        "rsi_windows": (8, 21, 63),
+        "stoch_windows": (8, 21, 63),
+        "macd_pairs": ((8, 21), (21, 63)),
+        "downside_window": 21,
+        "beta_window": 21,
+    },
+    # 成长因子：中期窗口
+    "growth": {
+        "ewma_windows": (8, 21, 63),
+        "rsi_windows": (8, 21, 63),
+        "stoch_windows": (8, 21, 63),
+        "macd_pairs": ((8, 21), (21, 63)),
+        "downside_window": 21,
+        "beta_window": 21,
+    },
+    # 流动性因子：中期窗口
+    "liquidity": {
+        "ewma_windows": (8, 21, 63),
+        "rsi_windows": (8, 21, 63),
+        "stoch_windows": (8, 21, 63),
+        "macd_pairs": ((8, 21), (21, 63)),
+        "downside_window": 21,
+        "beta_window": 21,
+    },
+    # 质量因子：中期窗口
+    "quality": {
+        "ewma_windows": (8, 21, 63),
+        "rsi_windows": (8, 21, 63),
+        "stoch_windows": (8, 21, 63),
+        "macd_pairs": ((8, 21), (21, 63)),
+        "downside_window": 21,
+        "beta_window": 21,
+    },
+    # 质量、成长、流动性：默认短中期，与动量一致
+}
+
+
+def apply_factor_feature_preset(
+    feature_config: "SJMFeatureConfig",
+    factor_name: str,
+    user_override: dict | None = None,
+) -> None:
+    """就地将因子预设 + 用户覆盖的特征参数写入 feature_config。
+
+    优先级：user_override > FACTOR_FEATURE_PRESETS > feature_config 现有值。
+    """
+    preset = FACTOR_FEATURE_PRESETS.get(factor_name, {})
+    merged = {**preset, **(user_override or {})}
+    for key, value in merged.items():
+        if hasattr(feature_config, key):
+            setattr(feature_config, key, value)
+
+
+_MARKET_BREADTH_CACHE: dict[tuple[str, tuple[str, ...]], pd.DataFrame] = {}
 
 
 def _safe_read_csv(path: Path, encoding_candidates: tuple[str, ...]) -> pd.DataFrame:
@@ -66,28 +167,29 @@ def _safe_read_csv(path: Path, encoding_candidates: tuple[str, ...]) -> pd.DataF
     raise ValueError(f"读取失败: {path}, last_error={last_err}")
 
 
-def load_momentum_returns(momentum_path: str) -> pd.DataFrame:
-    """读取动量组合日收益。
+def load_factor_returns(factor_path: str, factor_return_col: str) -> pd.DataFrame:
+    """读取因子组合日收益，并标准化为momentum_return列。
 
     预期输入列至少包含：
     - trade_date
-    - momentum_return
+    - factor_return_col
     """
 
-    path = Path(momentum_path)
+    path = Path(factor_path)
     if not path.exists():
-        raise FileNotFoundError(f"动量收益文件不存在: {path}")
+        raise FileNotFoundError(f"因子收益文件不存在: {path}")
 
     df = pd.read_csv(path)
-    required = {"trade_date", "momentum_return"}
+    required = {"trade_date", factor_return_col}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"动量收益文件缺少必要列: {missing}")
+        raise ValueError(f"因子收益文件缺少必要列: {missing}")
 
     df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
-    df["momentum_return"] = pd.to_numeric(df["momentum_return"], errors="coerce")
-    df = df.dropna(subset=["trade_date", "momentum_return"]).copy()
-    return df.sort_values("trade_date").reset_index(drop=True)
+    df[factor_return_col] = pd.to_numeric(df[factor_return_col], errors="coerce")
+    out = df[["trade_date", factor_return_col]].copy().rename(columns={factor_return_col: "momentum_return"})
+    out = out.dropna(subset=["trade_date", "momentum_return"]).copy()
+    return out.sort_values("trade_date").reset_index(drop=True)
 
 
 def load_market_returns(market_path: str) -> pd.DataFrame:
@@ -141,6 +243,82 @@ def load_market_returns(market_path: str) -> pd.DataFrame:
     out = out.dropna(subset=["trade_date", "market_return"]).copy()
     out = out.sort_values("trade_date").drop_duplicates("trade_date", keep="last")
     return out.reset_index(drop=True)
+
+
+def _load_market_breadth(
+    daily_data_root: str,
+    encoding_candidates: tuple[str, ...] = ("gbk", "gb18030", "utf-8-sig", "utf-8"),
+) -> pd.DataFrame:
+    """从全市场日线计算市场宽度，即每日上涨股票占比。"""
+
+    cache_key = (daily_data_root, tuple(encoding_candidates))
+    if cache_key in _MARKET_BREADTH_CACHE:
+        return _MARKET_BREADTH_CACHE[cache_key].copy()
+
+    price_panel = load_price_panel(
+        data_root=daily_data_root,
+        encoding_candidates=encoding_candidates,
+    )
+    price_with_ret = compute_daily_returns(price_panel)
+    valid = price_with_ret.dropna(subset=["trade_date", "ret"]).copy()
+    breadth = (
+        valid.assign(up=valid["ret"] > 0.0)
+        .groupby("trade_date", observed=True)["up"]
+        .mean()
+        .reset_index(name="market_breadth")
+    )
+    breadth["trade_date"] = pd.to_datetime(breadth["trade_date"], errors="coerce")
+    breadth = breadth.dropna(subset=["trade_date"]).sort_values("trade_date").reset_index(drop=True)
+    _MARKET_BREADTH_CACHE[cache_key] = breadth
+    return breadth.copy()
+
+
+def build_market_environment_features(market: pd.DataFrame, config: SJMFeatureConfig) -> pd.DataFrame:
+    """构建论文要求的市场环境变量并按交易日对齐。
+
+    输出至少包含：
+    - market_return
+    - market_volatility_*
+    - volatility_ratio_short_long
+    - market_momentum_*
+    - market_breadth（当 daily_data_root 可用时）
+    """
+
+    env = market.copy()
+    env["trade_date"] = pd.to_datetime(env["trade_date"], errors="coerce")
+    env["market_return"] = pd.to_numeric(env["market_return"], errors="coerce")
+    env = env.dropna(subset=["trade_date", "market_return"]).sort_values("trade_date").reset_index(drop=True)
+
+    windows = tuple(sorted(set(config.market_env_windows)))
+    for window in windows:
+        min_periods = max(5, int(np.ceil(window * config.min_periods_ratio)))
+        env[f"market_volatility_{window}"] = env["market_return"].rolling(
+            window=window,
+            min_periods=min_periods,
+        ).std(ddof=0)
+        env[f"market_momentum_{window}"] = (
+            (1.0 + env["market_return"]).rolling(window=window, min_periods=min_periods).apply(np.prod, raw=True)
+            - 1.0
+        )
+
+    if len(windows) >= 2:
+        short_w, long_w = windows[0], windows[-1]
+        env[f"volatility_ratio_{short_w}_{long_w}"] = (
+            env[f"market_volatility_{short_w}"] / env[f"market_volatility_{long_w}"].replace(0.0, np.nan)
+        )
+
+    if config.include_market_breadth and config.daily_data_root:
+        breadth = _load_market_breadth(config.daily_data_root)
+        env = env.merge(breadth, on="trade_date", how="left")
+        if "market_breadth" in env.columns:
+            for window in windows:
+                min_periods = max(5, int(np.ceil(window * config.min_periods_ratio)))
+                env[f"market_breadth_ma_{window}"] = env["market_breadth"].rolling(
+                    window=window,
+                    min_periods=min_periods,
+                ).mean()
+
+    return env
 
 
 def _rsi_from_series(level: pd.Series, window: int, min_periods: int) -> pd.Series:
@@ -287,6 +465,16 @@ def standardize_features(df: pd.DataFrame, config: SJMFeatureConfig) -> tuple[pd
         "active_beta",
         "market_return",
     ])
+    market_env_cols = [
+        c
+        for c in df.columns
+        if c.startswith("market_volatility_")
+        or c.startswith("market_momentum_")
+        or c.startswith("volatility_ratio_")
+        or c == "market_breadth"
+        or c.startswith("market_breadth_ma_")
+    ]
+    feature_cols.extend([c for c in market_env_cols if c not in feature_cols])
 
     out = df.copy()
     for col in feature_cols:
@@ -345,10 +533,12 @@ def add_optional_macro_features(
 def run_feature_pipeline(config: SJMFeatureConfig) -> pd.DataFrame:
     """执行第二步全流程：读取收益 → 构造特征 → 标准化 → 输出。"""
 
-    momentum = load_momentum_returns(config.momentum_path)
+    factor_path = config.factor_path or config.momentum_path
+    factor_df = load_factor_returns(factor_path, config.factor_return_col)
     market = load_market_returns(config.market_path)
+    market_env = build_market_environment_features(market, config)
 
-    base = momentum.merge(market, on="trade_date", how="inner")
+    base = factor_df.merge(market_env, on="trade_date", how="inner")
     base = base.sort_values("trade_date").reset_index(drop=True)
 
     feat = build_sjm_features(base, config)
@@ -369,7 +559,8 @@ def run_feature_pipeline(config: SJMFeatureConfig) -> pd.DataFrame:
 
 if __name__ == "__main__":
     cfg = SJMFeatureConfig(
-        momentum_path="outputs/momentum_return.csv",
+        factor_path="outputs/momentum_return.csv",
+        factor_return_col="momentum_return",
         market_path="沪深300.csv",
         output_path="outputs/sjm_features.csv",
         ewma_windows=(8, 21, 63),

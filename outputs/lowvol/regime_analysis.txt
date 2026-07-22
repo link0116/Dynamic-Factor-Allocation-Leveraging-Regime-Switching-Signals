@@ -1,0 +1,50 @@
+========================================================
+LowVol Regime Analysis
+========================================================
+
+一、SJM Parameters
+Number of States: 2
+Jump Penalty: 1.0
+Lambda/Kappa: 3.6
+Training Samples: 651
+Validation Sharpe: 3.765496717787242
+
+二、Bull/Bear统计
+state_name  days    share  average_duration  mean_active_return  median_active_return  active_volatility    sharpe  information_ratio  mean_factor_return  median_factor_return
+      Bull   552 0.427245         11.040000            0.005256              0.006061           0.310170  4.270553           4.270553            0.003216              0.003241
+      Bear   740 0.572755         14.509804           -0.003631             -0.003151           0.311945 -2.933009          -2.933009           -0.001965             -0.001668
+
+三、状态转移矩阵
+          Bull      Bear
+Bull  0.909420  0.090580
+Bear  0.067659  0.932341
+
+四、状态中心（State Centers）
+ state state_name  z_ewma_active_return_8  z_ewma_active_return_21  z_ewma_active_return_63   z_rsi_8  z_rsi_21  z_rsi_63  z_macd_8_21  z_macd_21_63  z_stoch_k_8  z_stoch_k_21  z_stoch_k_63  z_downside_deviation  z_active_beta  z_market_return  z_market_volatility_21  z_market_momentum_21  z_market_volatility_63  z_market_momentum_63  z_volatility_ratio_21_63  z_market_breadth  z_market_breadth_ma_21  z_market_breadth_ma_63  raw_state
+     0       Bear               -0.600606                -0.735781                -0.597578 -0.598617 -0.737652 -0.501523    -0.457847     -0.649939    -0.511793     -0.778709     -0.691237              0.255423       0.105772         0.158227               -0.209068              0.493276                0.010438              0.297864                 -0.356060          0.114286                0.245759                0.150433          0
+     1       Bull                0.698379                 0.855559                 0.694858  0.696066  0.857735  0.583166     0.532380      0.755743     0.595108      0.905476      0.803764             -0.297003      -0.122991        -0.183985                0.243102             -0.573577               -0.012137             -0.346354                  0.414024         -0.132891               -0.285767               -0.174922          1
+
+五、Feature Importance
+                 feature   weight  abs_weight_rank
+            z_stoch_k_21 0.426666                1
+                z_rsi_21 0.382860                2
+ z_ewma_active_return_21 0.380920                3
+            z_stoch_k_63 0.336195                4
+            z_macd_21_63 0.297223                5
+  z_ewma_active_return_8 0.253815                6
+                 z_rsi_8 0.252136                7
+ z_ewma_active_return_63 0.251262                8
+             z_stoch_k_8 0.184300                9
+                z_rsi_63 0.176978               10
+    z_market_momentum_21 0.171205               11
+             z_macd_8_21 0.147495               12
+z_volatility_ratio_21_63 0.089204               13
+    z_market_momentum_63 0.062427               14
+    z_downside_deviation 0.045905               15
+  z_market_breadth_ma_21 0.042497               16
+  z_market_volatility_21 0.030755               17
+         z_market_return 0.017616               18
+  z_market_breadth_ma_63 0.015923               19
+        z_market_breadth 0.009190               20
+           z_active_beta 0.007872               21
+  z_market_volatility_63 0.000077               22

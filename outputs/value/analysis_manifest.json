@@ -1,0 +1,27 @@
+{
+  "factor_name": "value",
+  "display_name": "Value",
+  "model_path": "models\\Value.pkl",
+  "state_daily_path": "outputs\\value\\sjm_state_daily.csv",
+  "state_statistics_path": "outputs\\value\\state_statistics.csv",
+  "transition_matrix_path": "outputs\\value\\transition_matrix.csv",
+  "report_path": "outputs\\value\\regime_analysis.txt",
+  "figures": {
+    "active_return": "outputs\\value\\figures\\01_active_return_regime.png",
+    "state_sequence": "outputs\\value\\figures\\02_state_sequence.png",
+    "cumulative": "outputs\\value\\figures\\03_cumulative_active_market.png",
+    "distribution": "outputs\\value\\figures\\04_return_distribution.png",
+    "radar": "outputs\\value\\figures\\05_state_centers_radar.png",
+    "feature_importance": "outputs\\value\\figures\\06_feature_importance.png",
+    "transition_heatmap": "outputs\\value\\figures\\07_transition_matrix_heatmap.png",
+    "rolling": "outputs\\value\\figures\\08_rolling_active_return_switches.png",
+    "paper_summary": "outputs\\value\\figures\\09_paper_style_summary.png"
+  },
+  "best_parameter": {
+    "gamma": 1.0,
+    "kappa": 3.6,
+    "train_window": 3.49,
+    "state_number": 2,
+    "Sharpe": 3.914583973041306
+  }
+}

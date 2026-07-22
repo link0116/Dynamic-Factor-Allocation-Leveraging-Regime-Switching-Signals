@@ -1,0 +1,5 @@
+﻿from_state,to_state,transition_count,transition_prob,from_state_name,to_state_name
+0,0,569,0.9530988274706867,Bear,Bear
+0,1,28,0.04690117252931323,Bear,Bull
+1,0,27,0.04909090909090909,Bull,Bear
+1,1,523,0.9509090909090909,Bull,Bull
