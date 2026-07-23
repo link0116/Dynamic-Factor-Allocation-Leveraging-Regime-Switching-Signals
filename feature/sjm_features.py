@@ -26,9 +26,8 @@ class SJMFeatureConfig:
     """SJM特征工程参数。
 
     字段说明：
-    - factor_path: 因子组合收益文件（可为动量/低波/规模）。
-    - factor_return_col: 因子收益列名，如 momentum_return/low_volatility_return/size_return。
-    - momentum_path: 兼容旧配置（将被factor_path优先覆盖）。
+    - factor_path: 当前因子组合收益文件，由主流程按因子注入。
+    - factor_return_col: 当前因子收益列名，由主流程按因子注入。
     - market_path: 市场指数数据文件（默认沪深300）。
     - output_path: 输出SJM输入特征文件。
     - ewma_windows: EWMA主动收益窗口列表。
@@ -43,11 +42,8 @@ class SJMFeatureConfig:
     - min_periods_ratio: 滚动类特征的最小有效样本比例。
     """
 
-    factor_path: str = "outputs/momentum_return.csv"
-    factor_return_col: str = "momentum_return"
-
-    # 兼容旧配置字段。
-    momentum_path: str = "outputs/momentum_return.csv"
+    factor_path: str = ""
+    factor_return_col: str = ""
     market_path: str = "沪深300.csv"
     output_path: str = "outputs/sjm_features.csv"
     daily_data_root: Optional[str] = "data/A股日线指标"
@@ -533,8 +529,10 @@ def add_optional_macro_features(
 def run_feature_pipeline(config: SJMFeatureConfig) -> pd.DataFrame:
     """执行第二步全流程：读取收益 → 构造特征 → 标准化 → 输出。"""
 
-    factor_path = config.factor_path or config.momentum_path
-    factor_df = load_factor_returns(factor_path, config.factor_return_col)
+    if not config.factor_path or not config.factor_return_col:
+        raise ValueError("构建SJM特征前必须配置当前因子的 factor_path 和 factor_return_col")
+
+    factor_df = load_factor_returns(config.factor_path, config.factor_return_col)
     market = load_market_returns(config.market_path)
     market_env = build_market_environment_features(market, config)
 

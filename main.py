@@ -66,7 +66,6 @@ class PipelineConfig:
 
     feature: SJMFeatureConfig = field(
         default_factory=lambda: SJMFeatureConfig(
-            momentum_path="outputs/factor_returns/momentum.csv",
             market_path="沪深300.csv",
             output_path="outputs/sjm_features.csv",
             ewma_windows=(8, 21, 63),
@@ -137,8 +136,8 @@ def _plot_regime_identification(
     """生成状态识别图：主动净值曲线 + Bull/Bear 背景色块。"""
 
     try:
-        import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
     except ImportError as err:
         raise ImportError("未安装matplotlib，无法生成可视化图") from err
 
@@ -249,8 +248,8 @@ def _plot_full_period_split(
     """生成全时期划分图：主动净值 + Train/Validation/Test区间 + 因子牛熊状态标注。"""
 
     try:
-        import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
     except ImportError as err:
         raise ImportError("未安装matplotlib，无法生成可视化图") from err
 
@@ -353,7 +352,6 @@ def _plot_full_period_split(
                     )
                     seg_start = i
 
-
             ax.axvspan(
                 st_dates[seg_start],
                 st_dates[-1],
@@ -404,13 +402,13 @@ def _plot_full_regime_identification(
     full_state_df: pd.DataFrame,
     tuning_cfg: SJMTuningConfig,
     output_path: str,
-    factor_display_name: str = "value"
+    factor_display_name: str = "value",
 ) -> None:
     """绘制全样本状态识别图（Training + Validation + Test）。"""
 
     try:
-        import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
     except ImportError as err:
         raise ImportError("未安装matplotlib，无法生成可视化图") from err
 
@@ -491,7 +489,6 @@ def _plot_full_regime_identification(
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
-
 def _factor_registry() -> dict[str, FactorSpec]:
     """集中注册可切换因子，新增因子时只需补一项。"""
 
@@ -561,7 +558,6 @@ def _configure_sjm_context_for_factor(config: PipelineConfig, spec: FactorSpec) 
 
     config.feature.factor_path = factor_path
     config.feature.factor_return_col = spec.return_col
-    config.feature.momentum_path = factor_path
     config.feature.output_path = str(feature_path)
 
     config.sjm_tuning.features_path = str(feature_path)
@@ -661,7 +657,6 @@ def _run_sjm_for_factor(config: PipelineConfig, spec: FactorSpec) -> dict[str, s
         "state_daily": config.sjm_train.output_state_path,
         "model": analysis_manifest["model_path"],
         "report": analysis_manifest["report_path"],
-        "figures": str(Path("outputs") / spec.name / "figures"),
     }
 
 
@@ -677,7 +672,7 @@ def run_pipeline(config: PipelineConfig) -> None:
     for item in summaries:
         print(
             f"[done] {item['factor']}: state={item['state_daily']}, "
-            f"model={item['model']}, report={item['report']}, figures={item['figures']}"
+            f"model={item['model']}, report={item['report']}"
         )
 
 
