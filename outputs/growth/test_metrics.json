@@ -1,0 +1,12 @@
+{
+  "AnnualReturn": 0.005809071184604608,
+  "AnnualVolatility": 0.00588118610542795,
+  "Sharpe": 0.9877380311504197,
+  "IR": 0.062227516663633464,
+  "MDD": -0.0035493829681445543,
+  "Turnover": 0.0019663955692749975,
+  "AverageHoldingTime": 30.142857142857142,
+  "BullDuration": 29.0,
+  "BearDuration": 31.285714285714285,
+  "StateSwitchTimes": 13.0
+}

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -16,6 +17,7 @@ from typing import Callable
 import pandas as pd
 
 from config import SJMTuningConfig
+from evaluation.metrics import compute_strategy_metrics
 from factor.cross_sectional import CrossSectionalFactorConfig, run_cross_sectional_factor_pipeline
 from feature.sjm_features import SJMFeatureConfig, apply_factor_feature_preset
 from sjm.regime_analysis import (
@@ -25,6 +27,7 @@ from sjm.regime_analysis import (
     fit_factor_sjm,
 )
 from sjm.train_sjm import SJMTrainConfig
+from strategy.long_short import build_long_short_returns, build_state_expected_return_map
 
 
 @dataclass(frozen=True)
@@ -561,11 +564,13 @@ def _configure_sjm_context_for_factor(config: PipelineConfig, spec: FactorSpec) 
     config.feature.output_path = str(feature_path)
 
     config.sjm_tuning.features_path = str(feature_path)
+    config.sjm_tuning.factor_return_col = spec.return_col
     config.sjm_tuning.best_param_path = str(best_param_path)
     config.sjm_tuning.param_result_path = str(output_dir / "parameter_result.csv")
     config.sjm_tuning.rolling_test_path = str(output_dir / "rolling_test_result.csv")
 
     config.sjm_train.features_path = str(feature_path)
+    config.sjm_train.factor_return_col = spec.return_col
     config.sjm_train.best_param_path = str(best_param_path)
     config.sjm_train.output_state_path = str(output_dir / "sjm_state_daily.csv")
     config.sjm_train.output_weight_path = str(output_dir / "sjm_feature_weight.csv")
@@ -583,6 +588,56 @@ def _configure_sjm_context_for_factor(config: PipelineConfig, spec: FactorSpec) 
         spec.name,
         config.factor_feature_overrides.get(spec.name),
     )
+
+
+def _export_fixed_test_evaluation(
+    config: PipelineConfig,
+    spec: FactorSpec,
+    state_daily: pd.DataFrame,
+) -> tuple[str, str] | None:
+    """用冻结模型和训练期状态语义评估固定测试集。"""
+
+    if config.sjm_tuning.tuning_mode != "fixed_split":
+        return None
+
+    data = state_daily.copy()
+    data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+    data = data.dropna(subset=["trade_date", "state", "active_return"]).sort_values("trade_date")
+
+    train_start = pd.to_datetime(config.sjm_tuning.fixed_train_start)
+    train_end = pd.to_datetime(config.sjm_tuning.fixed_train_end)
+    validation_start = pd.to_datetime(config.sjm_tuning.fixed_val_start)
+    test_start = pd.to_datetime(config.sjm_tuning.fixed_test_start)
+    train_data = data[(data["trade_date"] >= train_start) & (data["trade_date"] <= train_end)]
+    inference_data = data[data["trade_date"] >= validation_start]
+    if train_data.empty or inference_data.empty:
+        raise ValueError("固定切分缺少Training或Validation/Test状态，无法评估Test")
+
+    state_expected_return = build_state_expected_return_map(
+        train_state=train_data["state"].to_numpy(dtype=int),
+        train_active_return=train_data["active_return"].to_numpy(dtype=float),
+    )
+    strategy = build_long_short_returns(
+        data=inference_data[["trade_date", spec.return_col, "market_return", "state"]],
+        state_col="state",
+        state_expected_return=state_expected_return,
+        position_band=config.sjm_tuning.expected_return_band,
+        factor_return_col=spec.return_col,
+    )
+    test_strategy = strategy[strategy["trade_date"] >= test_start].copy()
+    if test_strategy.empty:
+        raise ValueError("Test区间无可用样本")
+
+    output_dir = Path("outputs") / spec.name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    strategy_path = output_dir / "test_strategy.csv"
+    metrics_path = output_dir / "test_metrics.json"
+    test_strategy.to_csv(strategy_path, index=False, encoding="utf-8-sig")
+    metrics_path.write_text(
+        json.dumps(compute_strategy_metrics(test_strategy), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return str(strategy_path), str(metrics_path)
 
 
 def _run_sjm_for_factor(config: PipelineConfig, spec: FactorSpec) -> dict[str, str]:
@@ -608,6 +663,7 @@ def _run_sjm_for_factor(config: PipelineConfig, spec: FactorSpec) -> dict[str, s
         output_dir=str(Path("outputs") / spec.name),
         result_dir=str(Path("results") / spec.name),
         model_path=str(Path("models") / f"{spec.display_name.replace(' ', '')}.pkl"),
+        factor_return_col=spec.return_col,
     )
     feature_dates = pd.to_datetime(feature_df["trade_date"], errors="coerce")
     train_start = pd.to_datetime(config.sjm_tuning.fixed_train_start)
@@ -621,6 +677,12 @@ def _run_sjm_for_factor(config: PipelineConfig, spec: FactorSpec) -> dict[str, s
         train_outputs=train_outputs,
         best_parameter=best_parameter,
         training_samples=training_samples,
+    )
+
+    test_evaluation = _export_fixed_test_evaluation(
+        config=config,
+        spec=spec,
+        state_daily=train_outputs["state_daily"],
     )
 
     full_period_state = pd.read_csv(analysis_manifest["state_daily_path"])
@@ -649,7 +711,7 @@ def _run_sjm_for_factor(config: PipelineConfig, spec: FactorSpec) -> dict[str, s
             factor_display_name=spec.display_name,
         )
 
-    return {
+    summary = {
         "factor": spec.name,
         "factor_return": spec.output_path_getter(config),
         "features": config.feature.output_path,
@@ -658,6 +720,9 @@ def _run_sjm_for_factor(config: PipelineConfig, spec: FactorSpec) -> dict[str, s
         "model": analysis_manifest["model_path"],
         "report": analysis_manifest["report_path"],
     }
+    if test_evaluation is not None:
+        summary["test_strategy"], summary["test_metrics"] = test_evaluation
+    return summary
 
 
 def run_pipeline(config: PipelineConfig) -> None:

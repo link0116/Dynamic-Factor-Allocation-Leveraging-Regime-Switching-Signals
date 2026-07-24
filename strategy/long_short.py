@@ -132,13 +132,15 @@ def build_long_short_returns(
     state_col: str,
     state_expected_return: dict[int, float],
     position_band: float = 0.05,
+    factor_return_col: str = "momentum_return",
 ) -> pd.DataFrame:
     """根据状态路径构建单因子多空策略收益。
 
     数学原理：
     - 主动收益定义：$r_t^{active} = r_t^{mom} - r_t^{mkt}$。
-    - 策略收益：$r_t^{strat} = p_t \\cdot r_t^{active}$。
-      其中 $p_t$ 由所属状态的预期主动收益线性映射而来。
+        - 信号仓位：$p_t^{signal}$ 由t日状态的预期主动收益映射而来。
+        - 执行仓位：$p_t = p_{t-1}^{signal}$，首日仓位为0。
+        - 策略收益：$r_t^{strat} = p_t \\cdot r_t^{active}$。
 
     为什么这样做：
     - 该策略把“状态识别”直接转成“因子暴露方向与强度”，
@@ -149,11 +151,12 @@ def build_long_short_returns(
       并在小预期收益区域使用线性缩放。
 
     输入输出：
-    - 输入data至少包含：trade_date, momentum_return, market_return, state_col
-    - 输出新增列：active_return, expected_active_return, position, strategy_return, state_name
+    - 输入data至少包含：trade_date, factor_return_col, market_return, state_col
+        - 输出新增列：active_return, expected_active_return, signal_position,
+            position, strategy_return, state_name
     """
 
-    required = {"trade_date", "momentum_return", "market_return", state_col}
+    required = {"trade_date", factor_return_col, "market_return", state_col}
     missing = required - set(data.columns)
     if missing:
         raise ValueError(f"构建多空收益缺少列: {missing}")
@@ -162,9 +165,12 @@ def build_long_short_returns(
     out["trade_date"] = pd.to_datetime(out["trade_date"], errors="coerce")
     out = out.dropna(subset=["trade_date", state_col]).sort_values("trade_date").reset_index(drop=True)
 
-    out["active_return"] = out["momentum_return"].astype(float) - out["market_return"].astype(float)
+    out["active_return"] = out[factor_return_col].astype(float) - out["market_return"].astype(float)
     out["expected_active_return"] = out[state_col].astype(int).map(lambda s: state_expected_return.get(int(s), 0.0))
-    out["position"] = out["expected_active_return"].map(lambda x: linear_position_mapping(float(x), band=position_band))
+    out["signal_position"] = out["expected_active_return"].map(
+        lambda x: linear_position_mapping(float(x), band=position_band)
+    )
+    out["position"] = out["signal_position"].shift(1).fillna(0.0)
     out["strategy_return"] = out["position"] * out["active_return"]
 
     state_name_map = assign_state_name_from_expected_return(state_expected_return)

@@ -39,7 +39,7 @@ from strategy.long_short import (
 )
 
 
-def _load_feature_data(path: str) -> tuple[pd.DataFrame, list[str]]:
+def _load_feature_data(path: str, factor_return_col: str) -> tuple[pd.DataFrame, list[str]]:
     """读取第二步特征并校验必要列。
 
     数学原理：
@@ -54,7 +54,7 @@ def _load_feature_data(path: str) -> tuple[pd.DataFrame, list[str]]:
     输入输出：
     - 输入：features_path
     - 输出：(df, z_cols)
-      df至少包含 trade_date, momentum_return, market_return, active_return, z_*。
+    df至少包含 trade_date, factor_return_col, market_return, active_return, z_*。
     """
 
     file_path = Path(path)
@@ -64,7 +64,7 @@ def _load_feature_data(path: str) -> tuple[pd.DataFrame, list[str]]:
         raise FileNotFoundError(f"特征文件不存在: {file_path}")
 
     df = pd.read_csv(file_path)
-    required = {"trade_date", "momentum_return", "market_return", "active_return"}
+    required = {"trade_date", factor_return_col, "market_return", "active_return"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"特征文件缺少必要列: {missing}")
@@ -75,7 +75,7 @@ def _load_feature_data(path: str) -> tuple[pd.DataFrame, list[str]]:
 
     df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
     df = df.dropna(subset=["trade_date"]).sort_values("trade_date").reset_index(drop=True)
-    df = df.dropna(subset=z_cols + ["momentum_return", "market_return", "active_return"]).reset_index(drop=True)
+    df = df.dropna(subset=z_cols + [factor_return_col, "market_return", "active_return"]).reset_index(drop=True)
     return df, z_cols
 
 
@@ -161,7 +161,7 @@ def _fit_and_infer(
 
     infer_state_raw = model.online_predict(infer_df[z_cols].to_numpy(dtype=float))
     infer_state = np.array([old_to_new[int(s)] for s in infer_state_raw], dtype=int)
-    infer_data = infer_df[["trade_date", "momentum_return", "market_return"]].copy()
+    infer_data = infer_df[["trade_date", cfg.factor_return_col, "market_return"]].copy()
     infer_data["state"] = infer_state.astype(int)
 
     strategy_df = build_long_short_returns(
@@ -169,6 +169,7 @@ def _fit_and_infer(
         state_col="state",
         state_expected_return=state_expected,
         position_band=cfg.expected_return_band,
+        factor_return_col=cfg.factor_return_col,
     )
     return strategy_df
 
@@ -349,7 +350,7 @@ def run_sjm_hyperparameter_tuning(cfg: SJMTuningConfig | None = None) -> dict[st
     """
 
     cfg = cfg or SJMTuningConfig()
-    df, z_cols = _load_feature_data(cfg.features_path)
+    df, z_cols = _load_feature_data(cfg.features_path, cfg.factor_return_col)
 
     if cfg.tuning_mode == "fixed_split":
         fixed_result = _run_fixed_split_tuning(df=df, z_cols=z_cols, cfg=cfg)

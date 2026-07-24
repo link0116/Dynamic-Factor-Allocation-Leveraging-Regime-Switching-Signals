@@ -5,46 +5,46 @@ Growth Regime Analysis
 一、SJM Parameters
 Number of States: 2
 Jump Penalty: 1.0
-Lambda/Kappa: 3.6
+Lambda/Kappa: 3.2
 Training Samples: 419
-Validation Sharpe: 2.1415583324913716
+Validation Sharpe: 1.1052580458738628
 
 二、Bull/Bear统计
 state_name  days    share  average_duration  mean_active_return  median_active_return  active_volatility    sharpe  information_ratio  mean_factor_return  median_factor_return
-      Bull   506 0.476011         23.000000            0.001447              0.001460           0.177299  2.056782           2.056782            0.000013             -0.000012
-      Bear   557 0.523989         25.318182           -0.001716             -0.001339           0.178684 -2.419605          -2.419605           -0.000370             -0.000320
+      Bull   519 0.488241         27.315789            0.001339              0.001403           0.176171  1.915453           1.915453            0.000032             -0.000002
+      Bear   544 0.511759         28.631579           -0.001688             -0.001273           0.180059 -2.362685          -2.362685           -0.000396             -0.000359
 
 三、状态转移矩阵
           Bull      Bear
-Bull  0.958416  0.041584
-Bear  0.039497  0.960503
+Bull  0.965251  0.034749
+Bear  0.034926  0.965074
 
 四、状态中心（State Centers）
- state state_name  z_ewma_active_return_8  z_ewma_active_return_21  z_ewma_active_return_63   z_rsi_8  z_rsi_21  z_rsi_63  z_macd_8_21  z_macd_21_63  z_stoch_k_8  z_stoch_k_21  z_stoch_k_63  z_downside_deviation  z_active_beta  z_market_return  z_market_volatility_21  z_market_momentum_21  z_market_volatility_63  z_market_momentum_63  z_volatility_ratio_21_63  z_market_breadth  z_market_breadth_ma_21  z_market_breadth_ma_63  raw_state
-     0       Bear               -0.432264                -0.621192                -0.661157 -0.454581 -0.672624 -0.600649    -0.290688     -0.634852    -0.360703     -0.624944     -0.736598              0.019233       0.097797         0.117923               -0.385216              0.587185               -0.197009              0.527261                 -0.387022          0.016364                0.341188                0.312087          0
-     1       Bull                0.557455                 0.801100                 0.852640  0.586236  0.867428  0.774607     0.374876      0.818717     0.465169      0.805938      0.949930             -0.024803      -0.126120        -0.152075                0.496781             -0.757244                0.254066             -0.679965                  0.499111         -0.021103               -0.440002               -0.402473          1
+ state state_name  z_ewma_active_return_8  z_ewma_active_return_21  z_ewma_active_return_63   z_rsi_8  z_rsi_21  z_rsi_63  z_macd_8_21  z_macd_21_63  z_stoch_k_8  z_stoch_k_21  z_stoch_k_63  z_downside_deviation  z_active_beta  z_market_return  z_market_volatility_21  z_market_momentum_21  z_market_volatility_63  z_market_momentum_63  z_volatility_ratio_21_63  z_market_breadth  z_market_breadth_ma_21  z_market_breadth_ma_63
+     0       Bear               -0.429886                -0.621279                -0.662640 -0.454775 -0.675424 -0.604112    -0.289945     -0.638550    -0.357058     -0.623257     -0.741796              0.022707       0.095221         0.116620               -0.383488              0.590223               -0.195843              0.529739                 -0.385483          0.015449                0.345114                0.312459
+     1       Bull                0.549040                 0.793482                 0.846306  0.580826  0.862635  0.771556     0.370311      0.815539     0.456025      0.796008      0.947403             -0.029001      -0.121614        -0.148943                0.489781             -0.753818                0.250125             -0.676569                  0.492329         -0.019731               -0.440770               -0.399065
 
 五、Feature Importance
                  feature   weight  abs_weight_rank
-            z_stoch_k_63 0.434323                1
-                z_rsi_21 0.358460                2
- z_ewma_active_return_63 0.345590                3
-            z_macd_21_63 0.316902                4
-            z_stoch_k_21 0.306398                5
- z_ewma_active_return_21 0.302464                6
-                z_rsi_63 0.281342                7
-    z_market_momentum_21 0.267884                8
-    z_market_momentum_63 0.211688                9
-                 z_rsi_8 0.151639               10
-  z_ewma_active_return_8 0.134984               11
-z_volatility_ratio_21_63 0.103794               12
-  z_market_volatility_21 0.102620               13
-             z_stoch_k_8 0.087233               14
-  z_market_breadth_ma_21 0.075707               15
-  z_market_breadth_ma_63 0.059710               16
-             z_macd_8_21 0.048855               17
-  z_market_volatility_63 0.010410               18
-         z_market_return 0.000000               19
-           z_active_beta 0.000000               19
-    z_downside_deviation 0.000000               19
-        z_market_breadth 0.000000               19
+            z_stoch_k_63 0.480296                1
+                z_rsi_21 0.378449                2
+ z_ewma_active_return_63 0.359926                3
+            z_macd_21_63 0.325987                4
+            z_stoch_k_21 0.305093                5
+ z_ewma_active_return_21 0.302428                6
+                z_rsi_63 0.279650                7
+    z_market_momentum_21 0.261690                8
+    z_market_momentum_63 0.188343                9
+                 z_rsi_8 0.108432               10
+  z_ewma_active_return_8 0.084592               11
+z_volatility_ratio_21_63 0.045391               12
+  z_market_volatility_21 0.043730               13
+             z_stoch_k_8 0.022537               14
+  z_market_breadth_ma_21 0.013456               15
+           z_active_beta 0.000000               16
+    z_downside_deviation 0.000000               16
+             z_macd_8_21 0.000000               16
+         z_market_return 0.000000               16
+  z_market_volatility_63 0.000000               16
+        z_market_breadth 0.000000               16
+  z_market_breadth_ma_63 0.000000               16

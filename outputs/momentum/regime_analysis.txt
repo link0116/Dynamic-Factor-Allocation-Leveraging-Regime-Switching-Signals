@@ -7,7 +7,7 @@ Number of States: 2
 Jump Penalty: 1.0
 Lambda/Kappa: 3.6
 Training Samples: 505
-Validation Sharpe: 2.2238894871531976
+Validation Sharpe: -0.1342049958497604
 
 二、Bull/Bear统计
 state_name  days    share  average_duration  mean_active_return  median_active_return  active_volatility    sharpe  information_ratio  mean_factor_return  median_factor_return
@@ -20,9 +20,9 @@ Bull  0.950909  0.049091
 Bear  0.046901  0.953099
 
 四、状态中心（State Centers）
- state state_name  z_ewma_active_return_8  z_ewma_active_return_21  z_ewma_active_return_63   z_rsi_8  z_rsi_21  z_rsi_63  z_macd_8_21  z_macd_21_63  z_stoch_k_8  z_stoch_k_21  z_stoch_k_63  z_downside_deviation  z_active_beta  z_market_return  z_market_volatility_21  z_market_momentum_21  z_market_volatility_63  z_market_momentum_63  z_volatility_ratio_21_63  z_market_breadth  z_market_breadth_ma_21  z_market_breadth_ma_63  raw_state
-     0       Bear               -0.593200                -0.812343                -0.843797 -0.615255 -0.823557 -0.699409    -0.396232     -0.796270    -0.509962     -0.815434     -0.884504              0.342917      -0.081392         0.151467               -0.351468              0.650735               -0.095988              0.499330                 -0.428668          0.045387                0.376741                0.343809          0
-     1       Bull                0.558977                 0.765477                 0.795116  0.579760  0.776044  0.659059     0.373372      0.750331     0.480541      0.768390      0.833475             -0.323134       0.076696        -0.142729                0.331191             -0.613193                0.090450             -0.470523                  0.403937         -0.042768               -0.355006               -0.323974          1
+ state state_name  z_ewma_active_return_8  z_ewma_active_return_21  z_ewma_active_return_63   z_rsi_8  z_rsi_21  z_rsi_63  z_macd_8_21  z_macd_21_63  z_stoch_k_8  z_stoch_k_21  z_stoch_k_63  z_downside_deviation  z_active_beta  z_market_return  z_market_volatility_21  z_market_momentum_21  z_market_volatility_63  z_market_momentum_63  z_volatility_ratio_21_63  z_market_breadth  z_market_breadth_ma_21  z_market_breadth_ma_63
+     0       Bear               -0.593200                -0.812343                -0.843797 -0.615255 -0.823557 -0.699409    -0.396232     -0.796270    -0.509962     -0.815434     -0.884504              0.342917      -0.081392         0.151467               -0.351468              0.650735               -0.095988              0.499330                 -0.428668          0.045387                0.376741                0.343809
+     1       Bull                0.558977                 0.765477                 0.795116  0.579760  0.776044  0.659059     0.373372      0.750331     0.480541      0.768390      0.833475             -0.323134       0.076696        -0.142729                0.331191             -0.613193                0.090450             -0.470523                  0.403937         -0.042768               -0.355006               -0.323974
 
 五、Feature Importance
                  feature   weight  abs_weight_rank

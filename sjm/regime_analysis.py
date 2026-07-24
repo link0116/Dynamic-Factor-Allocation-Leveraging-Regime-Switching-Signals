@@ -18,6 +18,7 @@ import pandas as pd
 
 from feature.sjm_features import SJMFeatureConfig, run_feature_pipeline
 from sjm.train_sjm import SJMTrainConfig, train_sjm_from_best_parameter
+from sparse_jump_model import OnlineState
 from sjm.tuner import run_sjm_hyperparameter_tuning
 
 
@@ -30,6 +31,7 @@ class FactorRegimeAnalysisConfig:
     output_dir: str
     result_dir: str
     model_path: str
+    factor_return_col: str = "momentum_return"
     annualization: int = 252
     rolling_window: int = 21
 
@@ -90,7 +92,11 @@ def _run_lengths(values: pd.Series) -> list[int]:
     return lengths
 
 
-def classify_bull_bear(state_daily: pd.DataFrame, annualization: int = 252) -> pd.DataFrame:
+def classify_bull_bear(
+    state_daily: pd.DataFrame,
+    factor_return_col: str,
+    annualization: int = 252,
+) -> pd.DataFrame:
     """Automatically label and renumber states by active-return economics.
 
     The primary sorting key is average active return.  Mean factor return and
@@ -98,7 +104,7 @@ def classify_bull_bear(state_daily: pd.DataFrame, annualization: int = 252) -> p
     The lowest-scoring state is Bear and the highest-scoring state is Bull.
     """
 
-    required = {"trade_date", "state", "active_return", "momentum_return"}
+    required = {"trade_date", "state", "active_return", factor_return_col}
     missing = required - set(state_daily.columns)
     if missing:
         raise ValueError(f"状态数据缺少列，无法自动识别Bull/Bear: {missing}")
@@ -106,8 +112,8 @@ def classify_bull_bear(state_daily: pd.DataFrame, annualization: int = 252) -> p
     data = state_daily.copy()
     data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
     data["active_return"] = pd.to_numeric(data["active_return"], errors="coerce")
-    data["momentum_return"] = pd.to_numeric(data["momentum_return"], errors="coerce")
-    data = data.dropna(subset=["trade_date", "state", "active_return", "momentum_return"])
+    data[factor_return_col] = pd.to_numeric(data[factor_return_col], errors="coerce")
+    data = data.dropna(subset=["trade_date", "state", "active_return", factor_return_col])
 
     rows = []
     for state, grp in data.groupby("state", observed=True):
@@ -115,7 +121,7 @@ def classify_bull_bear(state_daily: pd.DataFrame, annualization: int = 252) -> p
             {
                 "state": int(state),
                 "mean_active_return": float(grp["active_return"].mean()),
-                "mean_factor_return": float(grp["momentum_return"].mean()),
+                "mean_factor_return": float(grp[factor_return_col].mean()),
                 "information_ratio": _annualized_sharpe(grp["active_return"], annualization),
             }
         )
@@ -141,7 +147,11 @@ def classify_bull_bear(state_daily: pd.DataFrame, annualization: int = 252) -> p
     return data.sort_values("trade_date").reset_index(drop=True)
 
 
-def build_state_statistics(state_daily: pd.DataFrame, annualization: int = 252) -> pd.DataFrame:
+def build_state_statistics(
+    state_daily: pd.DataFrame,
+    factor_return_col: str,
+    annualization: int = 252,
+) -> pd.DataFrame:
     """Build Bull/Bear return and duration statistics."""
 
     data = state_daily.copy()
@@ -167,7 +177,7 @@ def build_state_statistics(state_daily: pd.DataFrame, annualization: int = 252) 
             own_lengths.append(current)
 
         active = pd.to_numeric(grp["active_return"], errors="coerce")
-        factor_ret = pd.to_numeric(grp["momentum_return"], errors="coerce")
+        factor_ret = pd.to_numeric(grp[factor_return_col], errors="coerce")
         rows.append(
             {
                 "state_name": state_name,
@@ -207,6 +217,7 @@ def build_transition_matrix(state_daily: pd.DataFrame) -> pd.DataFrame:
 
 def save_model(
     model: Any,
+    online_state: OnlineState,
     config: FactorRegimeAnalysisConfig,
     feature_weight: pd.DataFrame,
     state_centroid: pd.DataFrame,
@@ -220,6 +231,7 @@ def save_model(
         "factor_name": config.factor_name,
         "display_name": config.display_name,
         "model": model,
+        "online_state": online_state,
         "feature_columns": feature_weight["feature"].tolist() if "feature" in feature_weight.columns else [],
         "feature_weight": feature_weight,
         "state_centroid": state_centroid,
@@ -286,33 +298,30 @@ def export_factor_regime_outputs(
     out_dir = Path(config.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    state_daily = classify_bull_bear(train_outputs["state_daily"], annualization=config.annualization)
+    state_daily = train_outputs["state_daily"].copy()
+    required_state_cols = {"trade_date", "state", "state_name", "active_return", config.factor_return_col}
+    missing_state_cols = required_state_cols - set(state_daily.columns)
+    if missing_state_cols:
+        raise ValueError(f"训练输出缺少已冻结的状态语义列: {missing_state_cols}")
+    state_daily["trade_date"] = pd.to_datetime(state_daily["trade_date"], errors="coerce")
+    state_daily = state_daily.dropna(subset=["trade_date", "state"]).sort_values("trade_date").reset_index(drop=True)
     state_daily.to_csv(out_dir / "sjm_state_daily.csv", index=False, encoding="utf-8-sig")
 
     feature_weight = train_outputs["feature_weight"].copy()
     state_centroid = train_outputs["state_centroid"].copy()
-    if "raw_state" in state_daily.columns and "state" in state_centroid.columns:
-        remap = (
-            state_daily[["raw_state", "state", "state_name"]]
-            .drop_duplicates()
-            .set_index("raw_state")
-            .to_dict()
-        )
-        state_centroid["raw_state"] = state_centroid["state"].astype(int)
-        state_centroid["state"] = state_centroid["raw_state"].map(remap["state"]).fillna(state_centroid["state"]).astype(int)
-        state_centroid["state_name"] = state_centroid["state"].map(
-            {int(v): str(k) for k, v in state_daily[["state_name", "state"]].drop_duplicates().itertuples(index=False)}
-        ).fillna(state_centroid["state_name"])
-        state_centroid = state_centroid.sort_values("state").reset_index(drop=True)
-        state_centroid.to_csv(out_dir / "sjm_state_centroid.csv", index=False, encoding="utf-8-sig")
     transition_matrix = build_transition_matrix(state_daily)
-    state_stats = build_state_statistics(state_daily, annualization=config.annualization)
+    state_stats = build_state_statistics(
+        state_daily,
+        factor_return_col=config.factor_return_col,
+        annualization=config.annualization,
+    )
 
     state_stats.to_csv(out_dir / "state_statistics.csv", index=False, encoding="utf-8-sig")
     transition_matrix.to_csv(out_dir / "transition_matrix.csv", encoding="utf-8-sig")
 
     save_model(
         model=train_outputs["model"],
+        online_state=train_outputs.get("online_state", OnlineState()),
         config=config,
         feature_weight=feature_weight,
         state_centroid=state_centroid,

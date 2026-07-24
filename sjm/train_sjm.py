@@ -1,5 +1,5 @@
 """
-第三步：使用 Sparse Jump Model 对动量因子进行 2 状态识别（Bull/Bear）。
+第三步：使用 Sparse Jump Model 分别对七个因子进行 2 状态识别（Bull/Bear）。
 
 功能覆盖：
 1) 读取第二步标准化特征（z_列）。
@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from sparse_jump_model import SparseJumpModel
+from sparse_jump_model import OnlineState, SparseJumpModel
 from strategy.long_short import (
     assign_state_name_from_expected_return,
     build_state_expected_return_map,
@@ -42,6 +42,7 @@ class SJMTrainConfig:
     """SJM训练配置。"""
 
     features_path: str = "outputs/sjm_features.csv"
+    factor_return_col: str = "momentum_return"
     output_state_path: str = "outputs/sjm_state_daily.csv"
     output_weight_path: str = "outputs/sjm_feature_weight.csv"
     output_centroid_path: str = "outputs/sjm_state_centroid.csv"
@@ -72,7 +73,7 @@ class SJMTrainConfig:
     train_end_date: Optional[str] = None
 
 
-def _load_feature_data(features_path: str) -> pd.DataFrame:
+def _load_feature_data(features_path: str, factor_return_col: str) -> tuple[pd.DataFrame, list[str], str]:
     """读取第二步特征文件，并校验必要字段。"""
 
     path = Path(features_path)
@@ -85,6 +86,9 @@ def _load_feature_data(features_path: str) -> pd.DataFrame:
     if "active_return" not in df.columns:
         raise ValueError("特征文件缺少 active_return 列（用于Bull/Bear命名）")
 
+    if factor_return_col not in df.columns:
+        raise ValueError(f"特征文件缺少当前因子收益列: {factor_return_col}")
+
     z_cols = [c for c in df.columns if c.startswith("z_")]
     if not z_cols:
         raise ValueError("特征文件缺少标准化 z_ 特征列")
@@ -94,7 +98,7 @@ def _load_feature_data(features_path: str) -> pd.DataFrame:
 
     # SJM输入必须无缺失。
     df = df.dropna(subset=z_cols + ["active_return"]).reset_index(drop=True)
-    return df
+    return df, z_cols, factor_return_col
 
 
 def _load_best_parameter(best_param_path: str) -> dict:
@@ -207,8 +211,7 @@ def train_sjm(config: SJMTrainConfig) -> dict[str, pd.DataFrame | SparseJumpMode
     if config.manual_n_states != 2:
         raise ValueError("本任务第三步要求状态数固定为2，请设置 manual_n_states=2")
 
-    df = _load_feature_data(config.features_path)
-    z_cols = [c for c in df.columns if c.startswith("z_")]
+    df, z_cols, factor_return_col = _load_feature_data(config.features_path, config.factor_return_col)
 
     if config.train_end_date:
         cutoff = pd.to_datetime(config.train_end_date)
@@ -246,10 +249,15 @@ def train_sjm(config: SJMTrainConfig) -> dict[str, pd.DataFrame | SparseJumpMode
 
     # 全样本在线推断，严格因果路径。
     X_all = df[z_cols].to_numpy(dtype=float)
-    state_online_raw = model.online_predict(X_all)
+    online_state = OnlineState()
+    state_online_raw = model.online_predict(
+        X_all,
+        online_state=online_state,
+        dates=df["trade_date"].to_numpy(),
+    )
     state_online = np.array([old_to_new[int(s)] for s in state_online_raw], dtype=int)
 
-    state_daily = df[["trade_date", "active_return", "momentum_return", "market_return"]].copy()
+    state_daily = df[["trade_date", "active_return", factor_return_col, "market_return"]].copy()
     state_daily["state"] = state_online.astype(int)
     state_daily["state_name"] = state_daily["state"].map(lambda x: state_name_map.get(int(x), f"State_{int(x)}"))
 
@@ -276,6 +284,7 @@ def train_sjm(config: SJMTrainConfig) -> dict[str, pd.DataFrame | SparseJumpMode
         "feature_weight": feature_weight,
         "state_centroid": state_centroid,
         "state_transition": state_transition,
+        "online_state": online_state,
     }
 
 
@@ -294,8 +303,7 @@ def train_sjm_from_best_parameter(config: SJMTrainConfig) -> dict[str, pd.DataFr
     best_jump_penalty = float(best["gamma"])
     best_kappa = float(best["kappa"])
 
-    df = _load_feature_data(config.features_path)
-    z_cols = [c for c in df.columns if c.startswith("z_")]
+    df, z_cols, factor_return_col = _load_feature_data(config.features_path, config.factor_return_col)
 
     if config.tuning_mode == "fixed_split":
         train_start = pd.to_datetime(config.fixed_train_start)
@@ -334,14 +342,19 @@ def train_sjm_from_best_parameter(config: SJMTrainConfig) -> dict[str, pd.DataFr
         )
         state_name_map = assign_state_name_from_expected_return(train_state_expected)
 
-        infer_state_raw = model.online_predict(infer_df[z_cols].to_numpy(dtype=float))
+        online_state = OnlineState()
+        infer_state_raw = model.online_predict(
+            infer_df[z_cols].to_numpy(dtype=float),
+            online_state=online_state,
+            dates=infer_df["trade_date"].to_numpy(),
+        )
         infer_state = np.array([old_to_new[int(s)] for s in infer_state_raw], dtype=int)
 
-        train_out = train_df[["trade_date", "active_return", "momentum_return", "market_return"]].copy()
+        train_out = train_df[["trade_date", "active_return", factor_return_col, "market_return"]].copy()
         train_out["state"] = train_state.astype(int)
         train_out["state_name"] = train_out["state"].map(lambda s: state_name_map.get(int(s), f"State_{int(s)}"))
 
-        infer_out = infer_df[["trade_date", "active_return", "momentum_return", "market_return"]].copy()
+        infer_out = infer_df[["trade_date", "active_return", factor_return_col, "market_return"]].copy()
         infer_out["state"] = infer_state.astype(int)
         infer_out["state_name"] = infer_out["state"].map(lambda s: state_name_map.get(int(s), f"State_{int(s)}"))
 
@@ -375,18 +388,24 @@ def train_sjm_from_best_parameter(config: SJMTrainConfig) -> dict[str, pd.DataFr
             "state_centroid": state_centroid,
             "state_transition": state_transition,
             "best_parameter": best,
+            "online_state": online_state,
         }
 
     # rolling模式下回退到原训练接口（保持兼容）。
     return train_sjm(config)
 
 
-def online_inference(model: SparseJumpModel, latest_feature_df: pd.DataFrame) -> pd.DataFrame:
+def online_inference(
+    model: SparseJumpModel,
+    latest_feature_df: pd.DataFrame,
+    online_state: OnlineState,
+) -> pd.DataFrame:
     """在线推断接口。
 
     输入：
     - model: 已训练的SJM模型
     - latest_feature_df: 包含 z_特征列与 trade_date 的DataFrame（可多行）
+    - online_state: 当前因子独立持有的跨日DP状态
 
     输出：
     - trade_date
@@ -402,7 +421,11 @@ def online_inference(model: SparseJumpModel, latest_feature_df: pd.DataFrame) ->
     tmp = tmp.dropna(subset=["trade_date"] + z_cols).sort_values("trade_date").reset_index(drop=True)
 
     X = tmp[z_cols].to_numpy(dtype=float)
-    path = model.online_predict(X)
+    path = model.online_predict(
+        X,
+        online_state=online_state,
+        dates=tmp["trade_date"].to_numpy(),
+    )
     out = tmp[["trade_date"]].copy()
     out["state"] = path.astype(int)
     return out

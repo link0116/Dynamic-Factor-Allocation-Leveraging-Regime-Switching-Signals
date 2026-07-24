@@ -1,7 +1,7 @@
 {
-  "gamma": 1.0,
-  "kappa": 3.6,
+  "gamma": 2.0,
+  "kappa": 1.6,
   "train_window": 3.49,
   "state_number": 2,
-  "Sharpe": 2.9051824881561283
+  "Sharpe": 1.8984214020677137
 }

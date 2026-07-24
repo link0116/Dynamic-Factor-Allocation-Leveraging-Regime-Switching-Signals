@@ -6,22 +6,11 @@
   "state_statistics_path": "outputs\\size\\state_statistics.csv",
   "transition_matrix_path": "outputs\\size\\transition_matrix.csv",
   "report_path": "outputs\\size\\regime_analysis.txt",
-  "figures": {
-    "active_return": "outputs\\size\\figures\\01_active_return_regime.png",
-    "state_sequence": "outputs\\size\\figures\\02_state_sequence.png",
-    "cumulative": "outputs\\size\\figures\\03_cumulative_active_market.png",
-    "distribution": "outputs\\size\\figures\\04_return_distribution.png",
-    "radar": "outputs\\size\\figures\\05_state_centers_radar.png",
-    "feature_importance": "outputs\\size\\figures\\06_feature_importance.png",
-    "transition_heatmap": "outputs\\size\\figures\\07_transition_matrix_heatmap.png",
-    "rolling": "outputs\\size\\figures\\08_rolling_active_return_switches.png",
-    "paper_summary": "outputs\\size\\figures\\09_paper_style_summary.png"
-  },
   "best_parameter": {
-    "gamma": 1.0,
-    "kappa": 3.6,
+    "gamma": 2.0,
+    "kappa": 1.6,
     "train_window": 3.49,
     "state_number": 2,
-    "Sharpe": 2.9051824881561283
+    "Sharpe": 1.8984214020677137
   }
 }

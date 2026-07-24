@@ -35,6 +35,7 @@ class SJMTuningConfig:
 
     # 数据输入
     features_path: str = "outputs/sjm_features.csv"
+    factor_return_col: str = "momentum_return"
 
     # 参数搜索网格
     gamma_list: list[float] = field(default_factory=lambda: [1, 2, 4, 6, 8, 10, 15, 20])

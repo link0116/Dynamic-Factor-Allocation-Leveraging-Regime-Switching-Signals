@@ -3,7 +3,7 @@ SJM特征工程（第二步）：
 基于动量组合收益与市场收益，构造论文所需状态识别输入特征，并做标准化。
 
 对应论文《Dynamic Factor Allocation using Regime Switching Signals》的映射：
-1) 先有单因子收益（第一步 momentum_return）。
+1) 先有当前单因子收益（如 momentum_return/value_return）。
 2) 计算主动收益 Active Return = Momentum Return - Market Return。
 3) 对主动收益及市场环境构造技术/风险特征，作为 SJM 输入矩阵。
 4) 所有特征标准化后，交给 Sparse Jump Model。
@@ -37,8 +37,7 @@ class SJMFeatureConfig:
     - downside_window: 下行波动窗口。
     - beta_window: Active Beta窗口。
     - standardize_mode:
-        global: 全样本z-score（离线研究方便）；
-        expanding: 递增窗口z-score（更贴近在线推理，避免未来函数）。
+        expanding: 递增窗口z-score，严格避免未来函数。
     - min_periods_ratio: 滚动类特征的最小有效样本比例。
     """
 
@@ -164,7 +163,7 @@ def _safe_read_csv(path: Path, encoding_candidates: tuple[str, ...]) -> pd.DataF
 
 
 def load_factor_returns(factor_path: str, factor_return_col: str) -> pd.DataFrame:
-    """读取因子组合日收益，并标准化为momentum_return列。
+    """读取因子组合日收益，并保留当前因子的真实列名。
 
     预期输入列至少包含：
     - trade_date
@@ -183,8 +182,8 @@ def load_factor_returns(factor_path: str, factor_return_col: str) -> pd.DataFram
 
     df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
     df[factor_return_col] = pd.to_numeric(df[factor_return_col], errors="coerce")
-    out = df[["trade_date", factor_return_col]].copy().rename(columns={factor_return_col: "momentum_return"})
-    out = out.dropna(subset=["trade_date", "momentum_return"]).copy()
+    out = df[["trade_date", factor_return_col]].copy()
+    out = out.dropna(subset=["trade_date", factor_return_col]).copy()
     return out.sort_values("trade_date").reset_index(drop=True)
 
 
@@ -366,13 +365,13 @@ def _downside_deviation(ret: pd.Series, window: int, min_periods: int) -> pd.Ser
     return np.sqrt(downside_sq.rolling(window=window, min_periods=min_periods).mean())
 
 
-def _active_beta(momentum_ret: pd.Series, market_ret: pd.Series, window: int, min_periods: int) -> pd.Series:
+def _active_beta(factor_ret: pd.Series, market_ret: pd.Series, window: int, min_periods: int) -> pd.Series:
     """计算Active Beta。
 
-    定义：rolling_cov(momentum_return, market_return) / rolling_var(market_return)
+    定义：rolling_cov(factor_return, market_return) / rolling_var(market_return)
     """
 
-    cov = momentum_ret.rolling(window=window, min_periods=min_periods).cov(market_ret)
+    cov = factor_ret.rolling(window=window, min_periods=min_periods).cov(market_ret)
     var = market_ret.rolling(window=window, min_periods=min_periods).var(ddof=0)
     return cov / var.replace(0.0, np.nan)
 
@@ -400,7 +399,10 @@ def build_sjm_features(base_df: pd.DataFrame, config: SJMFeatureConfig) -> pd.Da
     min_periods_beta = max(2, int(np.ceil(config.beta_window * config.min_periods_ratio)))
 
     df = base_df.sort_values("trade_date").reset_index(drop=True).copy()
-    df["active_return"] = df["momentum_return"] - df["market_return"]
+    factor_return_col = config.factor_return_col
+    if factor_return_col not in df.columns:
+        raise ValueError(f"构造SJM特征缺少当前因子收益列: {factor_return_col}")
+    df["active_return"] = df[factor_return_col] - df["market_return"]
 
     # 把主动收益累积为主动净值，便于构造技术指标。
     df["active_nav"] = (1.0 + df["active_return"].fillna(0.0)).cumprod()
@@ -420,7 +422,7 @@ def build_sjm_features(base_df: pd.DataFrame, config: SJMFeatureConfig) -> pd.Da
 
     df["downside_deviation"] = _downside_deviation(df["active_return"], window=config.downside_window, min_periods=min_periods_down)
     df["active_beta"] = _active_beta(
-        df["momentum_return"],
+        df[factor_return_col],
         df["market_return"],
         window=config.beta_window,
         min_periods=min_periods_beta,
@@ -451,6 +453,9 @@ def _zscore_expanding(s: pd.Series, min_periods: int = 30) -> pd.Series:
 def standardize_features(df: pd.DataFrame, config: SJMFeatureConfig) -> tuple[pd.DataFrame, list[str]]:
     """对特征做标准化，并输出可供SJM直接使用的列清单。"""
 
+    if config.standardize_mode != "expanding":
+        raise ValueError("严格在线推断仅支持 standardize_mode='expanding'")
+
     feature_cols = []
     feature_cols.extend([f"ewma_active_return_{w}" for w in config.ewma_windows])
     feature_cols.extend([f"rsi_{w}" for w in config.rsi_windows])
@@ -474,12 +479,7 @@ def standardize_features(df: pd.DataFrame, config: SJMFeatureConfig) -> tuple[pd
 
     out = df.copy()
     for col in feature_cols:
-        if config.standardize_mode == "global":
-            out[f"z_{col}"] = _zscore_global(out[col])
-        elif config.standardize_mode == "expanding":
-            out[f"z_{col}"] = _zscore_expanding(out[col], min_periods=30)
-        else:
-            raise ValueError("standardize_mode 仅支持 'global' 或 'expanding'")
+        out[f"z_{col}"] = _zscore_expanding(out[col], min_periods=30)
 
     z_cols = [f"z_{c}" for c in feature_cols]
     return out, z_cols

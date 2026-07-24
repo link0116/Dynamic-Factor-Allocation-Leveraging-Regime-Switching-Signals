@@ -20,7 +20,18 @@ sparse_jump_model.py
 """
 
 from __future__ import annotations
+from dataclasses import dataclass
+
 import numpy as np
+
+
+@dataclass
+class OnlineState:
+    """单个因子的在线推断状态。"""
+
+    dp: np.ndarray | None = None
+    previous_state: int | None = None
+    current_date: np.datetime64 | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -226,19 +237,54 @@ class SparseJumpModel:
         return self, np.array([remap[s] for s in path])
 
     # ── 样本外在线（因果）推断 ─────────────────────────────────────────────
-    def online_predict(self, X_new: np.ndarray):
+    def online_predict(
+        self,
+        X_new: np.ndarray,
+        online_state: OnlineState | None = None,
+        dates: np.ndarray | None = None,
+    ) -> np.ndarray:
         """
         对新数据做在线状态推断：t 时刻只使用 <= t 的数据（前向 DP，不回溯）。
         必须在 fit() 之后调用，使用训练期学到的 mean_/std_/weights_/centroids_，
         不重新估计任何参数 —— 保证是真正的 out-of-sample。
+
+        默认保持旧接口语义：每次调用从空 DP 开始。传入 OnlineState 时，
+        本次递推从该因子的上一日 DP 继续，并原地更新状态。
         """
-        Xs = self._standardize(np.asarray(X_new, dtype=float))
+        X_new = np.asarray(X_new, dtype=float)
+        if X_new.ndim != 2:
+            raise ValueError("X_new必须是二维数组")
+        if len(X_new) == 0:
+            return np.empty(0, dtype=int)
+        if dates is not None and len(dates) != len(X_new):
+            raise ValueError("dates长度必须与X_new行数一致")
+        date_values = None
+        if dates is not None:
+            date_values = np.asarray(dates, dtype="datetime64[ns]")
+            if np.isnat(date_values).any():
+                raise ValueError("dates不能包含无效日期")
+            if len(date_values) > 1 and np.any(date_values[1:] <= date_values[:-1]):
+                raise ValueError("dates必须严格递增")
+            if (
+                online_state is not None
+                and online_state.current_date is not None
+                and date_values[0] <= online_state.current_date
+            ):
+                raise ValueError("新数据日期必须晚于OnlineState.current_date")
+
+        Xs = self._standardize(X_new)
         K = self.n_states
         cost = np.zeros((len(Xs), K))
         for k in range(K):
             diff = Xs - self.centroids_[k]
             cost[:, k] = (diff ** 2 * self.weights_).sum(axis=1)
-        path, _ = _online_path(cost, self.jump_penalty)
+        init_dp = online_state.dp if online_state is not None else None
+        path, final_dp = _online_path(cost, self.jump_penalty, init_dp=init_dp)
+        if online_state is not None:
+            online_state.dp = final_dp.copy()
+            online_state.previous_state = int(path[-1])
+            if date_values is not None:
+                online_state.current_date = date_values[-1]
         return path  # 已经是按 fit() 时排好序的状态编号（0=均值最低...）
 
 
