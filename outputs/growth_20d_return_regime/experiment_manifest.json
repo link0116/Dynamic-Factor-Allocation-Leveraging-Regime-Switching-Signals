@@ -1,0 +1,7 @@
+{
+  "method": "past_20_trading_day_compound_growth_active_return",
+  "input_path": "D:\\华安证券：状态切换信号的动态因子配置\\outputs\\growth\\sjm_features.csv",
+  "state_daily_path": "D:\\华安证券：状态切换信号的动态因子配置\\outputs\\growth_20d_return_regime\\growth_20d_state_daily.csv",
+  "state_statistics_path": "D:\\华安证券：状态切换信号的动态因子配置\\outputs\\growth_20d_return_regime\\state_statistics.csv",
+  "plot_path": "D:\\华安证券：状态切换信号的动态因子配置\\outputs\\growth_20d_return_regime\\full_period_split_plot.png"
+}

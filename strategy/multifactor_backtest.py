@@ -9,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
+from sklearn.covariance import LedoitWolf
 
 from factor.cross_sectional import (
     FACTOR_LIST,
@@ -33,9 +35,15 @@ class MultiFactorBacktestConfig:
     market_path: str = "沪深300.csv"
     state_root: str = "outputs"
     output_dir: str = "outputs/multifactor_backtest"
-    lambdas: tuple[float, ...] = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8)
+    lambdas: tuple[float, ...] = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8) #风险厌恶系数
     top_n: int = 100
     annualization: int = 252
+    holding_period_days: int = 21
+    ic_halflife_days: int = 120
+    turnover_window_days: int = 21
+    turnover_exclusion_quantile: float = 0.20
+    covariance_lookback_days: int = 252
+    max_stock_weight: float = 0.05
     start_date: str | None = None
     end_date: str | None = None
 
@@ -54,28 +62,24 @@ def _cross_sectional_zscore(values: pd.Series) -> pd.Series:
 
 
 def load_factor_state_history(config: MultiFactorBacktestConfig) -> dict[str, pd.DataFrame]:
-    """读取状态，并计算截至当日、仅包含 Bull 样本的扩展平均因子收益。"""
+    """读取各因子的逐日状态。"""
 
     histories: dict[str, pd.DataFrame] = {}
     state_root = _resolve_path(config.state_root)
     for factor in config.factor_names:
-        return_col = f"{factor}_return"
         path = state_root / factor / "sjm_state_daily.csv"
         if not path.exists():
             raise FileNotFoundError(f"缺少 {factor} 状态文件: {path}")
         data = pd.read_csv(path)
-        required = {"trade_date", "state_name", return_col}
+        required = {"trade_date", "state_name"}
         missing = required - set(data.columns)
         if missing:
             raise ValueError(f"{factor} 状态文件缺少列: {missing}")
 
-        data = data[["trade_date", "state_name", return_col]].copy()
+        data = data[["trade_date", "state_name"]].copy()
         data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
-        data[return_col] = pd.to_numeric(data[return_col], errors="coerce")
         data = data.dropna(subset=["trade_date"]).sort_values("trade_date")
-        bull_return = data[return_col].where(data["state_name"].eq("Bull"))
-        data["bull_mean_return"] = bull_return.expanding(min_periods=1).mean()
-        histories[factor] = data.set_index("trade_date")
+        histories[factor] = data.drop_duplicates("trade_date", keep="last").set_index("trade_date")
     return histories
 
 
@@ -106,60 +110,157 @@ def build_rebalance_schedule(trade_dates: pd.DatetimeIndex) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _rank_ic_series(
+    factor_score: pd.DataFrame,
+    forward_return_rank: pd.DataFrame,
+    min_universe_size: int = 30,
+) -> pd.Series:
+    """计算每日因子分数与未来持有期收益之间的截面 Spearman Rank IC。"""
+
+    common_dates = factor_score.index.intersection(forward_return_rank.index)
+    score = factor_score.reindex(common_dates).replace([np.inf, -np.inf], np.nan)
+    future_rank = forward_return_rank.reindex(index=common_dates, columns=score.columns)
+    valid_count = (score.notna() & future_rank.notna()).sum(axis=1)
+    rank_ic = score.rank(axis=1).corrwith(future_rank, axis=1)
+    return rank_ic.where(valid_count >= min_universe_size).dropna().sort_index()
+
+
+def _state_conditioned_icir(
+    rank_ic: pd.Series,
+    state_history: pd.DataFrame,
+    signal_date: pd.Timestamp,
+    trading_dates: pd.DatetimeIndex,
+    holding_period_days: int,
+    halflife_days: int,
+) -> tuple[float, str]:
+    """仅使用当期同状态且在信号日已完全实现的 IC 计算指数加权 ICIR。"""
+
+    dates = pd.DatetimeIndex(trading_dates).dropna().unique().sort_values()
+    signal_position = dates.searchsorted(signal_date, side="right") - 1
+    if signal_position < holding_period_days or signal_date not in state_history.index:
+        return 0.0, ""
+    cutoff_position = signal_position - holding_period_days
+    cutoff_date = dates[cutoff_position]
+    current_state = str(state_history.loc[signal_date, "state_name"])
+    eligible_ic = rank_ic.loc[:cutoff_date].dropna()
+    if len(eligible_ic) < 2:
+        return 0.0, current_state
+
+    historical_states = state_history["state_name"].reindex(eligible_ic.index)
+    eligible_ic = eligible_ic[historical_states.eq(current_state)]
+    if len(eligible_ic) < 2:
+        return 0.0, current_state
+
+    date_positions = pd.Series(np.arange(len(dates), dtype=float), index=dates)
+    observation_positions = date_positions.reindex(eligible_ic.index).dropna()
+    eligible_ic = eligible_ic.reindex(observation_positions.index)
+    ages = cutoff_position - observation_positions.to_numpy(dtype=float)
+    weights = np.power(0.5, ages / halflife_days)
+    values = eligible_ic.to_numpy(dtype=float)
+    weight_sum = float(weights.sum())
+    mean = float(np.dot(weights, values) / weight_sum)
+    variance = float(np.dot(weights, np.square(values - mean)) / weight_sum)
+    standard_deviation = np.sqrt(max(variance, 0.0))
+    if standard_deviation <= 1e-12:
+        return 0.0, current_state
+    return max(mean / standard_deviation, 0.0), current_state
+
+
 def _factor_snapshot(
     factor_scores: dict[str, pd.DataFrame],
+    factor_rank_ics: dict[str, pd.Series],
     state_histories: dict[str, pd.DataFrame],
     signal_date: pd.Timestamp,
-) -> tuple[pd.DataFrame, dict[str, float], dict[str, float]]:
-    active_returns: dict[str, float] = {}
+    trading_dates: pd.DatetimeIndex,
+    config: MultiFactorBacktestConfig,
+) -> tuple[pd.DataFrame, dict[str, float], dict[str, float], dict[str, str]]:
+    icirs: dict[str, float] = {}
+    factor_states: dict[str, str] = {}
     standardized: dict[str, pd.Series] = {}
     for factor, history in state_histories.items():
-        if signal_date not in history.index or str(history.loc[signal_date, "state_name"]) != "Bull":
-            continue
-        bull_mean = float(history.loc[signal_date, "bull_mean_return"])
-        if not np.isfinite(bull_mean):
-            continue
         score = factor_scores[factor]
         if signal_date not in score.index:
             continue
+        icir, state_name = _state_conditioned_icir(
+            factor_rank_ics[factor],
+            history,
+            signal_date,
+            trading_dates,
+            config.holding_period_days,
+            config.ic_halflife_days,
+        )
+        factor_states[factor] = state_name
+        if icir <= 0.0:
+            continue
         standardized[factor] = _cross_sectional_zscore(score.loc[signal_date])
-        active_returns[factor] = bull_mean
+        icirs[factor] = icir
 
-    denominator = float(sum(abs(value) for value in active_returns.values()))
+    denominator = float(sum(icirs.values()))
     if denominator <= 1e-12:
-        return pd.DataFrame(), {}, active_returns
-    factor_weights = {factor: abs(value) / denominator for factor, value in active_returns.items()}
+        return pd.DataFrame(), {}, icirs, factor_states
+    factor_weights = {factor: value / denominator for factor, value in icirs.items()}
     score_frame = pd.DataFrame(standardized).dropna(how="any")
     if score_frame.empty:
-        return pd.DataFrame(), factor_weights, active_returns
-    composite = sum(
-        score_frame[factor] * factor_weights[factor] * np.sign(active_returns[factor])
-        for factor in factor_weights
+        return pd.DataFrame(), factor_weights, icirs, factor_states
+    composite = sum(score_frame[factor] * factor_weights[factor] for factor in factor_weights)
+    return pd.DataFrame({"composite_score": composite}), factor_weights, icirs, factor_states
+
+
+def _markowitz_weights(
+    scores: pd.Series,
+    historical_returns: pd.DataFrame,
+    risk_aversion: float,
+    max_stock_weight: float,
+) -> pd.Series:
+    """使用 Ledoit-Wolf 协方差执行满仓、只做多、带个股上限的均值-方差优化。"""
+
+    codes = scores.index
+    if len(codes) * max_stock_weight < 1.0 - 1e-12:
+        raise ValueError("候选股票数量不足以满足单只股票权重上限")
+    samples = historical_returns.reindex(columns=codes).replace([np.inf, -np.inf], np.nan)
+    samples = samples.dropna(how="all")
+    if len(samples) < 2:
+        raise ValueError("历史收益样本不足，无法估计协方差矩阵")
+    samples = samples.fillna(samples.mean()).fillna(0.0)
+    covariance = LedoitWolf().fit(samples.to_numpy(dtype=float)).covariance_
+    expected_returns = pd.to_numeric(scores, errors="coerce").to_numpy(dtype=float)
+    initial = np.full(len(codes), 1.0 / len(codes), dtype=float)
+
+    def objective(weights: np.ndarray) -> float:
+        return float(-np.dot(expected_returns, weights) + risk_aversion * weights @ covariance @ weights)
+
+    def gradient(weights: np.ndarray) -> np.ndarray:
+        return -expected_returns + 2.0 * risk_aversion * covariance @ weights
+
+    result = minimize(
+        objective,
+        initial,
+        jac=gradient,
+        method="SLSQP",
+        bounds=[(0.0, max_stock_weight)] * len(codes),
+        constraints={"type": "eq", "fun": lambda weights: float(weights.sum() - 1.0)},
+        options={"ftol": 1e-10, "maxiter": 500},
     )
-    return pd.DataFrame({"composite_score": composite}), factor_weights, active_returns
-
-
-def _softmax_weights(scores: pd.Series, temperature: float) -> pd.Series:
-    scaled = temperature * pd.to_numeric(scores, errors="coerce")
-    shifted = scaled - float(scaled.max())
-    exp_score = np.exp(shifted)
-    return exp_score / float(exp_score.sum())
+    if not result.success:
+        raise RuntimeError(f"Markowitz 优化失败: {result.message}")
+    weights = np.where(result.x < 1e-10, 0.0, result.x)
+    if abs(float(weights.sum()) - 1.0) > 1e-6 or float(weights.max()) > max_stock_weight + 1e-6:
+        raise RuntimeError("Markowitz 优化结果未满足组合约束")
+    return pd.Series(weights, index=codes, dtype=float)
 
 
 def load_compact_backtest_inputs(
     config: MultiFactorBacktestConfig,
-) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], pd.Series]:
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, pd.Series], pd.DataFrame, pd.Series]:
     """流式读取日文件，以宽表和月度快照控制全市场数据的内存占用。"""
 
     data_root = _resolve_path(config.data_root)
     files = list(_iter_daily_files(data_root))
-    history_start = pd.Timestamp(config.start_date) - pd.Timedelta(days=450) if config.start_date else None
     backtest_end = pd.Timestamp(config.end_date) if config.end_date else None
     files = [
         path
         for path in files
         if (file_date := _extract_date_from_filename(path)) is not None
-        and (history_start is None or file_date >= history_start)
         and (backtest_end is None or file_date <= backtest_end)
     ]
     if not files:
@@ -186,8 +287,7 @@ def load_compact_backtest_inputs(
             daily["free_float_shares"], errors="coerce"
         ).replace(0.0, np.nan)
         turnover_rows.append(turnover.rename(trade_date))
-        if trade_date in signal_dates:
-            market_cap_rows.append(pd.to_numeric(daily["market_cap"], errors="coerce").rename(trade_date))
+        market_cap_rows.append(pd.to_numeric(daily["market_cap"], errors="coerce").rename(trade_date))
         if "stock_name" in daily.columns:
             stock_names.update(daily["stock_name"].dropna().astype(str).to_dict())
         if idx % 250 == 0:
@@ -197,73 +297,104 @@ def load_compact_backtest_inputs(
     turnover = pd.DataFrame(turnover_rows).reindex(index=close.index, columns=close.columns)
     market_cap = pd.DataFrame(market_cap_rows).reindex(columns=close.columns).sort_index()
     daily_returns = close.pct_change(fill_method=None)
-    signal_index = market_cap.index
+    signal_index = pd.DatetimeIndex(sorted(signal_dates))
+    forward_return_rank = (close.shift(-config.holding_period_days) / close - 1.0).rank(axis=1)
     factor_scores: dict[str, pd.DataFrame] = {}
+    factor_rank_ics: dict[str, pd.Series] = {}
+
+    def save_factor(factor: str, daily_score: pd.DataFrame) -> None:
+        factor_rank_ics[factor] = _rank_ic_series(daily_score, forward_return_rank)
+        factor_scores[factor] = daily_score.reindex(signal_index)
 
     if "momentum" in config.factor_names:
-        rows: list[pd.Series] = []
-        for signal_date in signal_index:
-            position = close.index.get_loc(signal_date)
-            if position >= 273:
-                rows.append((close.iloc[position - 21] / close.iloc[position - 273] - 1.0).rename(signal_date))
-        factor_scores["momentum"] = pd.DataFrame(rows)
+        momentum = close.shift(21) / close.shift(273) - 1.0
+        save_factor("momentum", momentum)
+        del momentum
 
     if "lowvol" in config.factor_names:
         rolling_volatility = daily_returns.rolling(252, min_periods=126).std()
-        factor_scores["lowvol"] = -rolling_volatility.reindex(signal_index)
+        save_factor("lowvol", -rolling_volatility)
         del rolling_volatility
 
     if "size" in config.factor_names:
-        factor_scores["size"] = -np.log(market_cap.replace(0.0, np.nan))
+        size = -np.log(market_cap.replace(0.0, np.nan))
+        save_factor("size", size)
+        del size
 
+    rolling_turnover = turnover.rolling(
+        config.turnover_window_days,
+        min_periods=max(5, config.turnover_window_days // 2),
+    ).mean()
     if "liquidity" in config.factor_names:
-        rolling_turnover = turnover.rolling(21, min_periods=10).mean()
-        factor_scores["liquidity"] = rolling_turnover.reindex(signal_index)
-        del rolling_turnover
+        save_factor("liquidity", rolling_turnover)
     del turnover
 
     fundamental_factors = set(config.factor_names) & {"value", "quality", "growth"}
     if fundamental_factors:
-        signal_panel = market_cap.stack().rename("market_cap").dropna().reset_index()
-        signal_panel.columns = ["trade_date", "stock_code", "market_cap"]
+        daily_panel = market_cap.stack().rename("market_cap").dropna().reset_index()
+        daily_panel.columns = ["trade_date", "stock_code", "market_cap"]
         for factor in sorted(fundamental_factors):
-            factor_scores[factor] = build_factor_score(
-                signal_panel,
+            daily_score = build_factor_score(
+                daily_panel,
                 CrossSectionalFactorConfig(
                     factor_name=factor,
                     data_root=config.data_root,
                     financial_root=config.financial_root,
                 ),
             )
+            save_factor(factor, daily_score)
+            del daily_score
 
     names = pd.Series(stock_names, dtype=str)
-    return daily_returns, factor_scores, names
+    return daily_returns, factor_scores, factor_rank_ics, rolling_turnover.reindex(signal_index), names
 
 
 def build_monthly_targets(
     schedule: pd.DataFrame,
+    daily_returns: pd.DataFrame,
     factor_scores: dict[str, pd.DataFrame],
+    factor_rank_ics: dict[str, pd.Series],
     state_histories: dict[str, pd.DataFrame],
+    rolling_turnover: pd.DataFrame,
     stock_names: pd.Series,
     config: MultiFactorBacktestConfig,
 ) -> pd.DataFrame:
-    """按月生成各 lambda 的目标持仓。"""
+    """按月生成各风险厌恶系数下的 Markowitz 目标持仓。"""
 
     rows: list[dict[str, object]] = []
     for period in schedule.itertuples(index=False):
-        snapshot, factor_weights, bull_returns = _factor_snapshot(
-            factor_scores, state_histories, pd.Timestamp(period.signal_date)
+        signal_date = pd.Timestamp(period.signal_date)
+        snapshot, factor_weights, icirs, factor_states = _factor_snapshot(
+            factor_scores,
+            factor_rank_ics,
+            state_histories,
+            signal_date,
+            daily_returns.index,
+            config,
         )
-        if snapshot.empty:
+        if snapshot.empty or signal_date not in rolling_turnover.index:
             continue
         security_names = snapshot.index.to_series().map(stock_names)
         non_st_mask = ~security_names.fillna("").astype(str).str.contains("ST", case=False, regex=False)
-        selected = snapshot.loc[non_st_mask].nlargest(config.top_n, "composite_score")
-        if selected.empty:
+        turnover = pd.to_numeric(rolling_turnover.loc[signal_date], errors="coerce")
+        turnover_threshold = float(turnover.quantile(config.turnover_exclusion_quantile))
+        liquid_mask = turnover.reindex(snapshot.index).ge(turnover_threshold).fillna(False)
+        selected = snapshot.loc[non_st_mask & liquid_mask].nlargest(config.top_n, "composite_score")
+        if len(selected) * config.max_stock_weight < 1.0 - 1e-12:
             continue
+        historical_returns = daily_returns.loc[:signal_date, selected.index].tail(
+            config.covariance_lookback_days
+        )
         for lambda_value in config.lambdas:
-            weights = _softmax_weights(selected["composite_score"], lambda_value)
+            weights = _markowitz_weights(
+                selected["composite_score"],
+                historical_returns,
+                lambda_value,
+                config.max_stock_weight,
+            )
             for stock_code, weight in weights.items():
+                if weight <= 0.0:
+                    continue
                 rows.append(
                     {
                         "lambda": lambda_value,
@@ -276,7 +407,8 @@ def build_monthly_targets(
                         "composite_score": float(selected.loc[stock_code, "composite_score"]),
                         "active_factors": ",".join(factor_weights),
                         "factor_weights": json.dumps(factor_weights, ensure_ascii=False),
-                        "bull_mean_returns": json.dumps(bull_returns, ensure_ascii=False),
+                        "state_conditioned_icir": json.dumps(icirs, ensure_ascii=False),
+                        "factor_states": json.dumps(factor_states, ensure_ascii=False),
                     }
                 )
     return pd.DataFrame(rows)
@@ -316,6 +448,46 @@ def simulate_monthly_portfolio(
     result = result.sort_values("trade_date").drop_duplicates("trade_date", keep="last")
     result["nav"] = (1.0 + result["strategy_return"]).cumprod()
     return result.reset_index(drop=True)
+
+
+def compute_portfolio_turnover(
+    daily_returns: pd.DataFrame,
+    targets: pd.DataFrame,
+    lambda_value: float,
+) -> float:
+    """计算各调仓期单边换手率的均值，首期建仓记为100%。"""
+
+    selected = targets[np.isclose(targets["lambda"], lambda_value)].copy()
+    if selected.empty:
+        return float("nan")
+
+    period_turnovers: list[float] = []
+    pre_rebalance_weights: pd.Series | None = None
+    for rebalance_date, holdings in selected.groupby("rebalance_date", sort=True):
+        target_weights = holdings.set_index("stock_code")["weight"].astype(float)
+        target_weights.index = target_weights.index.astype(str)
+        target_weights = target_weights.groupby(level=0).sum()
+        target_weights /= float(target_weights.sum())
+
+        if pre_rebalance_weights is None:
+            period_turnovers.append(1.0)
+        else:
+            all_codes = target_weights.index.union(pre_rebalance_weights.index)
+            weight_change = target_weights.reindex(all_codes, fill_value=0.0) - pre_rebalance_weights.reindex(
+                all_codes, fill_value=0.0
+            )
+            period_turnovers.append(0.5 * float(weight_change.abs().sum()))
+
+        period_end = pd.Timestamp(holdings["period_end"].iloc[0])
+        period_returns = daily_returns.loc[
+            (daily_returns.index >= pd.Timestamp(rebalance_date)) & (daily_returns.index <= period_end),
+            target_weights.index,
+        ]
+        growth = (1.0 + period_returns.fillna(0.0)).prod(axis=0)
+        ending_values = target_weights * growth
+        pre_rebalance_weights = ending_values / float(ending_values.sum())
+
+    return float(np.mean(period_turnovers))
 
 
 def compute_backtest_metrics(returns: pd.DataFrame, annualization: int = 252) -> dict[str, float]:
@@ -394,8 +566,16 @@ def run_multifactor_backtest(config: MultiFactorBacktestConfig | None = None) ->
     cfg = config or MultiFactorBacktestConfig()
     if cfg.top_n <= 0 or not cfg.lambdas or any(value <= 0 for value in cfg.lambdas):
         raise ValueError("top_n 必须为正，lambdas 必须为非空正数序列")
+    if cfg.holding_period_days <= 0 or cfg.ic_halflife_days <= 0 or cfg.turnover_window_days <= 0:
+        raise ValueError("持有周期、IC 半衰期和换手率窗口必须为正")
+    if not 0.0 < cfg.turnover_exclusion_quantile < 1.0:
+        raise ValueError("换手率剔除分位数必须在 0 和 1 之间")
+    if not 0.0 < cfg.max_stock_weight <= 1.0 or cfg.top_n * cfg.max_stock_weight < 1.0:
+        raise ValueError("top_n 与单只股票权重上限无法满足满仓约束")
 
-    daily_returns, factor_scores, stock_names = load_compact_backtest_inputs(cfg)
+    daily_returns, factor_scores, factor_rank_ics, rolling_turnover, stock_names = (
+        load_compact_backtest_inputs(cfg)
+    )
     histories = load_factor_state_history(cfg)
 
     schedule = build_rebalance_schedule(daily_returns.index)
@@ -405,7 +585,16 @@ def run_multifactor_backtest(config: MultiFactorBacktestConfig | None = None) ->
         end_date = pd.Timestamp(cfg.end_date)
         schedule = schedule[schedule["rebalance_date"] <= end_date].copy()
         schedule["period_end"] = schedule["period_end"].clip(upper=end_date)
-    targets = build_monthly_targets(schedule, factor_scores, histories, stock_names, cfg)
+    targets = build_monthly_targets(
+        schedule,
+        daily_returns,
+        factor_scores,
+        factor_rank_ics,
+        histories,
+        rolling_turnover,
+        stock_names,
+        cfg,
+    )
     if targets.empty:
         raise ValueError("未生成任何持仓，请检查回测区间、状态文件和因子分值")
 
@@ -414,6 +603,7 @@ def run_multifactor_backtest(config: MultiFactorBacktestConfig | None = None) ->
     for lambda_value in cfg.lambdas:
         returns = simulate_monthly_portfolio(daily_returns, targets, lambda_value)
         metrics = compute_backtest_metrics(returns, cfg.annualization)
+        metrics["Turnover"] = compute_portfolio_turnover(daily_returns, targets, lambda_value)
         all_returns[lambda_value] = returns
         metric_rows.append({"lambda": lambda_value, "TotalReturn": float(returns["nav"].iloc[-1] - 1.0), **metrics})
 
@@ -428,6 +618,9 @@ def run_multifactor_backtest(config: MultiFactorBacktestConfig | None = None) ->
     lambda_results.to_csv(output_dir / "lambda_results.csv", index=False, encoding="utf-8-sig")
     best_returns.to_csv(output_dir / "daily_returns.csv", index=False, encoding="utf-8-sig")
     best_holdings.to_csv(output_dir / "monthly_holdings.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(factor_rank_ics).rename_axis("trade_date").to_csv(
+        output_dir / "rank_ic.csv", encoding="utf-8-sig"
+    )
     best_metrics = lambda_results[np.isclose(lambda_results["lambda"], best_lambda)].iloc[0].to_dict()
     (output_dir / "metrics.json").write_text(
         json.dumps(best_metrics, ensure_ascii=False, indent=2), encoding="utf-8"
