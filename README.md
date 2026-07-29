@@ -331,6 +331,56 @@ python -m strategy.multifactor_backtest \
 python -m strategy.multifactor_backtest --start-date 2024-06-03 --end-date 2025-12-31 --top-n 100
 ```
 
+### Size、Value、Liquidity 三因子对比实验
+
+该实验保持主多因子回测的 ICIR 权重、股票池过滤、调仓、风险优化和参数搜索不变，仅使用 `size`、`value`、`liquidity` 计算 Alpha。结果以主回测相同格式输出到 `outputs/size_value_liquidity_backtest/`：
+
+```powershell
+python -m experiments.size_value_liquidity_backtest
+```
+
+实验不会写入主程序的 `outputs/multifactor_backtest/`。为防止重复运行覆盖已有实验结果，如果目标目录已存在且非空，程序会直接退出；此时应通过 `--output-dir` 指定新的目录。
+
+也可指定与主回测相同的区间和候选股票数量参数：
+
+```powershell
+python -m experiments.size_value_liquidity_backtest --start-date 2024-06-03 --end-date 2025-12-31 --top-n 100
+```
+
+保留已有三因子结果并生成另一组结果：
+
+```powershell
+python -m experiments.size_value_liquidity_backtest --output-dir outputs/size_value_liquidity_backtest_v2
+```
+
+### Size、Value、Liquidity、Momentum 四因子对比实验
+
+该实验保持主多因子回测的 ICIR 权重、股票池过滤、调仓、风险优化和参数搜索不变，仅使用 `size`、`value`、`liquidity`、`momentum` 计算 Alpha。结果以主回测相同格式输出到 `outputs/size_value_liquidity_momentum_backtest/`：
+
+```powershell
+python -m experiments.size_value_liquidity_momentum_backtest
+```
+
+如需保留已有结果，可指定新的输出目录：
+
+```powershell
+python -m experiments.size_value_liquidity_momentum_backtest --output-dir outputs/size_value_liquidity_momentum_backtest_v2
+```
+
+### Size、Value、Liquidity、Momentum、Growth 五因子对比实验
+
+该实验保持主多因子回测的 ICIR 权重、股票池过滤、调仓、风险优化和参数搜索不变，仅使用 `size`、`value`、`liquidity`、`momentum`、`growth` 计算 Alpha。结果以主回测相同格式输出到 `outputs/size_value_liquidity_momentum_growth_backtest/`：
+
+```powershell
+python -m experiments.size_value_liquidity_momentum_growth_backtest
+```
+
+如需保留已有结果，可指定新的输出目录：
+
+```powershell
+python -m experiments.size_value_liquidity_momentum_growth_backtest --output-dir outputs/size_value_liquidity_momentum_growth_backtest_v2
+```
+
 ### 第三步：运行测试
 
 ```bash
