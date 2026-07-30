@@ -353,6 +353,20 @@ python -m experiments.size_value_liquidity_backtest --start-date 2024-06-03 --en
 python -m experiments.size_value_liquidity_backtest --output-dir outputs/size_value_liquidity_backtest_v2
 ```
 
+### Size、Value、Liquidity、Growth 四因子对比实验
+
+该实验保持主多因子回测的 ICIR 权重、股票池过滤、调仓、风险优化和参数搜索不变，仅使用 `size`、`value`、`liquidity`、`growth` 计算 Alpha。结果以主回测相同格式输出到 `outputs/size_value_liquidity_growth_backtest/`：
+
+```powershell
+python -m experiments.size_value_liquidity_growth_backtest
+```
+
+如需保留已有结果，可指定新的输出目录：
+
+```powershell
+python -m experiments.size_value_liquidity_growth_backtest --output-dir outputs/size_value_liquidity_growth_backtest_v2
+```
+
 ### Size、Value、Liquidity、Momentum 四因子对比实验
 
 该实验保持主多因子回测的 ICIR 权重、股票池过滤、调仓、风险优化和参数搜索不变，仅使用 `size`、`value`、`liquidity`、`momentum` 计算 Alpha。结果以主回测相同格式输出到 `outputs/size_value_liquidity_momentum_backtest/`：
@@ -394,6 +408,22 @@ python -m unittest discover -s tests -v
 ```bash
 python -m experiments.growth_20d_regime
 ```
+
+### 七因子状态稳定性评分
+
+使用严格早于 2024-06-01 的全部可用 SJM 日度状态，对七个因子计算状态切换频率（SF）、平均状态持续时间（ASD）、持续时间方差（DV）和最长状态占比（LRR）。四项指标在七因子横截面上分别使用总体标准差进行 Z-score 标准化，状态稳定性分数为：
+
+$$
+SSS=0.25\left[-Z(SF)+Z(ASD)-Z(DV)+Z(LRR)\right]
+$$
+
+运行命令：
+
+```powershell
+python -m experiments.state_stability_score
+```
+
+默认结果写入 `outputs/state_stability_score/state_stability_scores.csv`，包含原始指标、标准化分项、SSS、稳定性排名及各因子的实际样本范围。可通过 `--cutoff-date` 和 `--output` 修改截止日与输出路径。
 
 ## 配置说明
 
@@ -490,6 +520,10 @@ print(result["best_lambda"], result["metrics"])
 | `daily_returns.csv` | 最优组合每日收益、净值及沪深 300 基准净值 |
 | `metrics.json` | 最优 `lambda` 与策略绩效，包括平均单边换手率 `Turnover` |
 | `cumulative_return.png` | 多因子策略与沪深 300 累计净值图 |
+
+### 状态稳定性评分输出
+
+`outputs/state_stability_score/state_stability_scores.csv` 保存七个因子的 SF、ASD、DV、LRR、四项横截面 Z-score、最终 SSS 和稳定性排名。
 
 ## 时间完整性设计
 
